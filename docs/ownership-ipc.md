@@ -14,6 +14,13 @@ keyring or unlock an existing one. Enter the keyring password only in the native
 desktop prompt. Xodus never receives that password, runs itself as root, or
 silently falls back to plaintext storage. Cancelling the prompt stops before
 Microsoft sign-in. An existing unlocked keyring does not show this prompt.
+`xodus-service` also requests this native unlock prompt before reading credentials
+or provisioning a device. Cancelling it stops startup cleanly, without treating a
+locked keyring as a missing device identity. Service startup does not create a
+missing keyring; use `login` for initial setup. The native prompt allows up to five
+minutes, so launchers must keep the service alive while waiting (Orion allows six
+minutes for the prompt and remaining startup work). Cancelling in Orion still
+stops the waiting service immediately.
 GNOME Keyring or a Secret Service-compatible KWallet must be installed and running
 in the user session; a missing service produces an actionable error. Installing
 desktop packages is not done automatically or without user authorization.

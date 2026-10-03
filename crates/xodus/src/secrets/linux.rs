@@ -3,17 +3,27 @@ use dbus_secret_service::{EncryptionType, Error, SecretService};
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(super) enum SetupError {
     #[error(
-        "The desktop password service is unavailable. Enable GNOME Keyring or a Secret Service-compatible KWallet in your desktop session, then retry Sign in. Do not run Xodus with sudo."
+        "The desktop password service is unavailable. Enable GNOME Keyring or a Secret Service-compatible KWallet in your desktop session, then retry. Do not run Xodus with sudo."
     )]
     Unavailable,
     #[error(
-        "Keyring setup was cancelled or timed out. Retry Sign in to reopen the desktop password prompt; no Microsoft sign-in was started."
+        "Keyring unlock or setup was cancelled or timed out. Retry the operation to reopen the desktop password prompt. Credentials were not accessed."
     )]
     Cancelled,
     #[error(
         "The desktop could not create or unlock the password keyring. Check that its graphical password prompt is installed and available, then retry Sign in. Credentials were not saved to a plaintext fallback."
     )]
     Access,
+    #[error(
+        "No default password keyring exists. Sign in through Xodus to create one using the desktop password dialog, then start the service again."
+    )]
+    Missing,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Preparation {
+    Login,
+    Service,
 }
 
 enum State {
@@ -28,9 +38,12 @@ trait Keyring {
     fn unlock(&self) -> Result<(), SetupError>;
 }
 
-fn ensure_ready(keyring: &impl Keyring) -> Result<(), SetupError> {
+fn ensure_ready(keyring: &impl Keyring, preparation: Preparation) -> Result<(), SetupError> {
     match keyring.state()? {
-        State::Missing => keyring.create(),
+        State::Missing => match preparation {
+            Preparation::Login => keyring.create(),
+            Preparation::Service => Err(SetupError::Missing),
+        },
         State::Locked => keyring.unlock(),
         State::Ready => Ok(()),
     }
@@ -81,10 +94,10 @@ impl Keyring for DesktopKeyring {
     }
 }
 
-pub(super) fn prepare() -> Result<(), SetupError> {
+pub(super) fn prepare(preparation: Preparation) -> Result<(), SetupError> {
     let service = SecretService::connect_with_max_prompt_timeout(EncryptionType::Dh, 300)
         .map_err(|_| SetupError::Unavailable)?;
-    ensure_ready(&DesktopKeyring(service))
+    ensure_ready(&DesktopKeyring(service), preparation)
 }
 
 #[cfg(test)]
@@ -136,7 +149,7 @@ mod tests {
                 fail_prompt: false,
                 calls: RefCell::default(),
             };
-            assert!(ensure_ready(&mock).is_ok());
+            assert!(ensure_ready(&mock, Preparation::Login).is_ok());
             assert_eq!(*mock.calls.borrow(), expected);
         }
     }
@@ -148,7 +161,10 @@ mod tests {
             fail_prompt: false,
             calls: RefCell::default(),
         };
-        assert_eq!(ensure_ready(&mock), Err(SetupError::Access));
+        assert_eq!(
+            ensure_ready(&mock, Preparation::Login),
+            Err(SetupError::Access)
+        );
         assert!(mock.calls.borrow().is_empty());
     }
 
@@ -160,8 +176,43 @@ mod tests {
                 fail_prompt: true,
                 calls: RefCell::default(),
             };
-            assert_eq!(ensure_ready(&mock), Err(SetupError::Cancelled));
+            assert_eq!(
+                ensure_ready(&mock, Preparation::Login),
+                Err(SetupError::Cancelled)
+            );
             assert_eq!(mock.calls.borrow().len(), 1);
         }
+    }
+
+    #[test]
+    fn service_unlocks_existing_keyring_without_creating_a_missing_one() {
+        for (state, expected, calls) in [
+            (Ok(State::Locked), Ok(()), vec!["unlock"]),
+            (Ok(State::Ready), Ok(()), vec![]),
+            (Ok(State::Missing), Err(SetupError::Missing), vec![]),
+            (Err(SetupError::Access), Err(SetupError::Access), vec![]),
+        ] {
+            let mock = Mock {
+                state,
+                fail_prompt: false,
+                calls: RefCell::default(),
+            };
+            assert_eq!(ensure_ready(&mock, Preparation::Service), expected);
+            assert_eq!(*mock.calls.borrow(), calls);
+        }
+    }
+
+    #[test]
+    fn cancelled_service_unlock_does_not_retry_or_create_a_keyring() {
+        let mock = Mock {
+            state: Ok(State::Locked),
+            fail_prompt: true,
+            calls: RefCell::default(),
+        };
+        assert_eq!(
+            ensure_ready(&mock, Preparation::Service),
+            Err(SetupError::Cancelled)
+        );
+        assert_eq!(*mock.calls.borrow(), vec!["unlock"]);
     }
 }

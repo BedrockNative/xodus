@@ -1,5 +1,6 @@
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
@@ -16,7 +17,7 @@ mod simple_context;
 const PROTO_MAGIC: u32 = 0x58445350;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
     let registry =
         tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
@@ -37,7 +38,25 @@ async fn main() {
         registry.init();
     }
 
-    xodus::secrets::init_secrets().expect("Failed to init keychain");
+    // Do not mistake an inaccessible keyring for a missing device identity.
+    // The desktop owns the password dialog; Xodus never receives the password.
+    match tokio::task::spawn_blocking(xodus::secrets::prepare_service).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("Xodus service could not access the keyring: {error}");
+            return ExitCode::FAILURE;
+        }
+        Err(_) => {
+            eprintln!("Xodus service could not finish preparing the desktop keyring.");
+            return ExitCode::FAILURE;
+        }
+    }
+    if xodus::secrets::init_secrets().is_err() {
+        eprintln!(
+            "Xodus service could not initialize credential storage after keyring preparation."
+        );
+        return ExitCode::FAILURE;
+    }
     let tokens = Arc::new(TokenManager::with_keychain_and_memory());
     xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens).await;
     let xodus::models::secrets::Token::Legacy(device_token) =
@@ -79,4 +98,5 @@ async fn main() {
     }
 
     _ = tokio::fs::remove_file(socket_path).await;
+    ExitCode::SUCCESS
 }

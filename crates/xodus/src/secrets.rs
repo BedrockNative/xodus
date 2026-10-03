@@ -7,7 +7,15 @@ mod linux;
 /// are entered into the Secret Service's own prompt, never the CLI or launcher.
 pub fn prepare_login() -> Result<(), String> {
     #[cfg(all(target_os = "linux", not(feature = "key-chain-file")))]
-    linux::prepare().map_err(|error| error.to_string())?;
+    linux::prepare(linux::Preparation::Login).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Unlock an existing desktop keyring before the service reads any credentials.
+/// Unlike login, service startup never creates a missing keyring.
+pub fn prepare_service() -> Result<(), String> {
+    #[cfg(all(target_os = "linux", not(feature = "key-chain-file")))]
+    linux::prepare(linux::Preparation::Service).map_err(|error| error.to_string())?;
     Ok(())
 }
 
