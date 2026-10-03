@@ -4,7 +4,7 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowT
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::window::{Window, WindowBuilder};
 use wry::http::{HeaderMap, HeaderValue};
-use wry::{PageLoadEvent, WebView, WebViewBuilder};
+use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder};
 use xodus::models::live::{DAProperty, HostBridgeMessage};
 
 type HandlerResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -73,6 +73,7 @@ struct RuntimeState<T: SessionHandler> {
     window: Option<Window>,
     active_session: Option<SessionId>,
     active_webview: Option<WebView>,
+    web_context: Option<WebContext>,
     result: Option<T::Output>,
     error: Option<String>,
 }
@@ -155,7 +156,9 @@ pub fn run_sessions<T>(handler: T) -> HandlerResult<Option<T::Output>>
 where
     T: SessionHandler,
 {
+    let profile = xodus::config::directory()?;
     let mut event_loop: EventLoop<CustomEvent> = EventLoopBuilder::with_user_event().build();
+    let web_context = profile.map(|directory| WebContext::new(Some(directory.join("webview"))));
     let proxy = event_loop.create_proxy();
     let mut state = RuntimeState {
         handler,
@@ -163,6 +166,7 @@ where
         window: None,
         active_session: None,
         active_webview: None,
+        web_context,
         result: None,
         error: None,
     };
@@ -332,8 +336,11 @@ fn create_session<T: SessionHandler>(
     window.set_title(&request.title);
 
     let proxy_ipc = proxy.clone();
-    let builder = WebViewBuilder::new()
-            .with_url(&request.url)
+    let builder = match state.web_context.as_mut() {
+        Some(context) => WebViewBuilder::new_with_web_context(context),
+        None => WebViewBuilder::new(),
+    };
+    let builder = builder.with_url(&request.url)
             .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; MSAppHost/3.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.26100")
             .with_headers(request.headers)
             .with_initialization_script("window.external = {notify: window.ipc.postMessage }")

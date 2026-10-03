@@ -83,6 +83,37 @@ Running xodus-service in debug
 cargo run --bin xodus-service
 ```
 
+Set `XODUS_SOCK_NAME` to change the socket filename under `$XDG_RUNTIME_DIR`
+on Linux (`/tmp` on macOS). An unset or empty value defaults to `xodus.sock`.
+Use the same value when launching WineGDK so both connect to the same socket:
+
+```bash
+XODUS_SOCK_NAME=my-xodus.sock cargo run --bin xodus-service
+```
+
+Set `XODUS_CONFIG_DIR` to give the CLI and service a shared, isolated profile:
+
+```bash
+export XODUS_CONFIG_DIR="$HOME/.config/xodus/my-profile"
+export XODUS_SOCK_NAME=my-profile.sock
+cargo run --bin xodus-cli -- login
+cargo run --bin xodus-service
+```
+
+The directory is created automatically. The existing credential backend stays
+in use: system-keyring credentials are scoped by the canonical directory path,
+so different profiles cannot overwrite each other's entries. Builds using the
+`xodus/key-chain-file` feature store `.xodus-keyring.ron` inside the profile
+instead. On Linux, the CLI's login browser data is stored in `webview/` inside
+the profile. Unset or empty `XODUS_CONFIG_DIR` preserves the existing defaults.
+Existing credentials are not copied into a new profile; log in for that profile.
+Moving a profile changes its credential namespace, while symlinks resolving to
+the same directory share the same namespace.
+
+The service socket is configured independently: give simultaneously running
+profiles different `XODUS_SOCK_NAME` values and pass the matching value to
+WineGDK. Download, extraction, and license output paths still follow CLI options.
+
 Debug and profile `xodus-cli` or `xodus-service` with [tokio-console]([tokio-console](https://github.com/tokio-rs/console))
 
 ```
