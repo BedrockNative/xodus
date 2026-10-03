@@ -7,6 +7,7 @@ pub trait TokenBackend: Send + Sync {
 }
 
 pub trait ExpiringTokenBackend: TokenBackend {
+    fn clear(&self) -> Result<(), TokenStoreError>;
     fn set_with_expiry(
         &self,
         key: &str,

@@ -46,6 +46,11 @@ impl TokenBackend for MemoryBackend {
 }
 
 impl ExpiringTokenBackend for MemoryBackend {
+    fn clear(&self) -> Result<(), TokenStoreError> {
+        self.inner.lock().unwrap().clear();
+        Ok(())
+    }
+
     fn set_with_expiry(
         &self,
         key: &str,

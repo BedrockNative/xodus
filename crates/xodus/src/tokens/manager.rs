@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -72,9 +73,121 @@ mod ownership_tests {
         assert!(other.installed_key(content).is_err());
         assert!(profile.installed_key(uuid::Uuid::from_u128(2)).is_err());
     }
+
+    #[test]
+    fn selecting_and_removing_accounts_preserves_other_credentials_and_installed_keys() {
+        let profile = TokenManager::with_memory();
+        sign_in(&profile, "first");
+        sign_in(&profile, "second");
+        let first = profile
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.username == "first")
+            .unwrap();
+        let second = profile
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.username == "second")
+            .unwrap();
+        let content = uuid::Uuid::from_u128(1);
+        profile.save_installed_key(content, &[9; 32]).unwrap();
+        profile.select_account(&first.id).unwrap();
+        assert_eq!(profile.get_user().unwrap().puid, "first");
+        assert!(
+            matches!(profile.get_user_sts_token().unwrap(), Token::Compact(token) if token == "test-first")
+        );
+        assert_eq!(
+            profile
+                .accounts()
+                .unwrap()
+                .iter()
+                .filter(|a| a.active)
+                .count(),
+            1
+        );
+        assert!(profile.select_account("unknown").is_err());
+        assert!(profile.remove_account("unknown").is_err());
+        assert_eq!(profile.accounts().unwrap().len(), 2);
+        profile.remove_account(&first.id).unwrap();
+        assert_eq!(profile.get_user().unwrap().puid, "second");
+        assert!(
+            matches!(profile.get_user_sts_token().unwrap(), Token::Compact(token) if token == "test-second")
+        );
+        profile.remove_account(&second.id).unwrap();
+        assert!(profile.accounts().unwrap().is_empty());
+        assert!(profile.get_user_sts_token().is_err());
+        assert_eq!(profile.installed_key(content).unwrap(), [9; 32]);
+    }
+
+    #[test]
+    fn public_summaries_never_include_tokens_or_raw_user_ids() {
+        let profile = TokenManager::with_memory();
+        sign_in(&profile, "private-user-id");
+        profile
+            .save_user(&User {
+                puid: "private-user-id".into(),
+                username: "Player".into(),
+            })
+            .unwrap();
+        let json = serde_json::to_string(&profile.accounts().unwrap()).unwrap();
+        assert!(json.contains("Player"));
+        assert!(!json.contains("private-user-id"));
+        assert!(!json.contains("test-"));
+        assert!(!json.contains("sts"));
+    }
+
+    #[test]
+    fn inactive_removal_does_not_switch_current_user() {
+        let profile = TokenManager::with_memory();
+        sign_in(&profile, "first");
+        sign_in(&profile, "second");
+        let first = profile
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .find(|a| !a.active)
+            .unwrap();
+        profile.remove_account(&first.id).unwrap();
+        assert_eq!(profile.get_user().unwrap().puid, "second");
+        assert_eq!(profile.ownership_accounts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn account_switch_clears_ephemeral_cache() {
+        let memory = Arc::new(MemoryBackend::default());
+        let profile = TokenManager::new(Arc::new(MemoryBackend::default()), memory.clone());
+        sign_in(&profile, "first");
+        sign_in(&profile, "second");
+        memory.set("cached-xsts", b"private").unwrap();
+        let first = profile
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .find(|a| !a.active)
+            .unwrap();
+        profile.select_account(&first.id).unwrap();
+        assert!(memory.get("cached-xsts").unwrap().is_none());
+    }
 }
 
 pub const PASSPORT_STS: &str = "http://Passport.NET/STS";
+
+/// Safe to return to frontends. Never serialize SavedAccount outside secure storage.
+#[derive(serde::Serialize)]
+pub struct AccountSummary {
+    pub id: String,
+    pub username: String,
+    pub active: bool,
+}
+
+fn account_id(user: &User) -> String {
+    Sha256::digest(user.puid.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Semantic facade over the two storage tiers: a persistent, keychain-backed tier
 /// for STS/device/user credentials, and an ephemeral tier for short-lived
@@ -116,6 +229,7 @@ impl TokenManager {
     }
 
     pub fn remove_persistent(&self) -> Result<(), TokenStoreError> {
+        self.ephemeral.clear()?;
         self.persistent.remove(keys::SAVED_ACCOUNTS)?;
         self.persistent.remove(keys::DEVICE_TOKENS)?;
         self.persistent.remove(keys::USER_TOKENS)?;
@@ -182,6 +296,7 @@ impl TokenManager {
     }
 
     pub fn save_user(&self, user: &User) -> Result<(), TokenStoreError> {
+        self.ephemeral.clear()?;
         if self
             .get_user()
             .is_ok_and(|previous| previous.puid != user.puid)
@@ -207,6 +322,65 @@ impl TokenManager {
         accounts.insert(0, current);
         self.persistent
             .set(keys::SAVED_ACCOUNTS, &serde_json::to_vec(&accounts)?)
+    }
+
+    pub fn accounts(&self) -> Result<Vec<AccountSummary>, TokenStoreError> {
+        let active = match self.get_user() {
+            Ok(user) => Some(user.puid),
+            Err(TokenStoreError::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(self
+            .ownership_accounts()?
+            .iter()
+            .map(|account| AccountSummary {
+                id: account_id(&account.user),
+                username: account.user.username.clone(),
+                active: active.as_ref() == Some(&account.user.puid),
+            })
+            .collect())
+    }
+
+    pub fn select_account(&self, id: &str) -> Result<(), TokenStoreError> {
+        let accounts = self.ownership_accounts()?;
+        let account = accounts
+            .iter()
+            .find(|a| account_id(&a.user) == id)
+            .ok_or(TokenStoreError::NotFound)?;
+        // Preserve every account before replacing the active identity. On failure,
+        // credentials can never be associated with the wrong user.
+        self.persistent
+            .set(keys::SAVED_ACCOUNTS, &serde_json::to_vec(&accounts)?)?;
+        self.activate_account(Some(account))
+    }
+
+    pub fn remove_account(&self, id: &str) -> Result<(), TokenStoreError> {
+        let mut accounts = self.ownership_accounts()?;
+        let index = accounts
+            .iter()
+            .position(|a| account_id(&a.user) == id)
+            .ok_or(TokenStoreError::NotFound)?;
+        let removed = accounts.remove(index);
+        if self
+            .get_user()
+            .is_ok_and(|user| user.puid == removed.user.puid)
+        {
+            self.activate_account(accounts.first())?;
+        }
+        self.persistent
+            .set(keys::SAVED_ACCOUNTS, &serde_json::to_vec(&accounts)?)
+    }
+
+    fn activate_account(&self, account: Option<&SavedAccount>) -> Result<(), TokenStoreError> {
+        self.ephemeral.clear()?;
+        self.persistent.remove(keys::USER_TOKENS)?;
+        self.persistent.remove(keys::USER_INFO)?;
+        if let Some(account) = account {
+            self.persistent
+                .set(keys::USER_INFO, &serde_json::to_vec(&account.user)?)?;
+            self.save_user_token(PASSPORT_STS.into(), account.sts.clone())?;
+        }
+        Ok(())
     }
 
     /// Installed content is deliberately retained across account logout. These

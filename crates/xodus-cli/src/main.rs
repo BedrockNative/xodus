@@ -13,6 +13,15 @@ mod webview;
 
 #[derive(Subcommand)]
 enum SubCommand {
+    #[command(
+        about = "Manage accounts in this isolated profile; JSON output never includes tokens"
+    )]
+    Accounts {
+        #[arg(long, help = "Allow the desktop's native keyring unlock prompt")]
+        unlock: bool,
+        #[command(subcommand)]
+        action: commands::accounts::AccountAction,
+    },
     #[cfg(unix)]
     #[command(about = "Verify purchase over IPC, then install and save the local launch license")]
     InstallOwned {
@@ -150,8 +159,11 @@ struct CliArgs {
 #[tokio::main]
 async fn main() -> ExitCode {
     let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
-    let registry =
-        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
+    let registry = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(filter),
+    );
 
     #[cfg(feature = "tokio_console")]
     {
@@ -235,6 +247,12 @@ async fn main() -> ExitCode {
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
+    if matches!(args.command, SubCommand::Accounts { unlock: true, .. })
+        && let Err(error) = xodus::secrets::prepare_service()
+    {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
     if xodus::secrets::init_secrets().is_err() {
         eprintln!(
             "Unable to access secure credential storage. Retry Sign in to prepare or unlock your desktop keyring."
@@ -251,7 +269,10 @@ async fn main() -> ExitCode {
     // these fully offline commands were unusable.
     let mut needs_device_credentials = !matches!(
         args.command,
-        SubCommand::Clep { .. } | SubCommand::SpLicense { .. } | SubCommand::Logout { .. }
+        SubCommand::Clep { .. }
+            | SubCommand::SpLicense { .. }
+            | SubCommand::Logout { .. }
+            | SubCommand::Accounts { .. }
     );
     #[cfg(unix)]
     if matches!(
@@ -268,6 +289,7 @@ async fn main() -> ExitCode {
     }
 
     let code = match args.command {
+        SubCommand::Accounts { action, .. } => commands::accounts::run(&tokens, action),
         #[cfg(unix)]
         SubCommand::InstallOwned {
             product: _,
