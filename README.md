@@ -137,6 +137,12 @@ playing installed games without another license request, see
 `XODUS_SOCKET` can select an absolute socket path; it takes precedence over
 `XODUS_SOCK_NAME` in both the CLI and the service.
 
+For independent game identities, start a service with `XODUS_ACCOUNT_ID` set
+to an opaque ID from `xodus-cli accounts list`. User tokens are isolated in
+memory for that session; the profile's current account stays unchanged. Use a
+different socket per game and keep its service alive until that game exits.
+See [session integration](docs/release-0.5.0.md).
+
 ```
 Usage: xodus-cli <COMMAND>
 

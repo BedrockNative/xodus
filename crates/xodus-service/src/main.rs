@@ -57,7 +57,24 @@ async fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let tokens = Arc::new(TokenManager::with_keychain_and_memory());
+    let profile = TokenManager::with_keychain_and_memory();
+    let tokens = match std::env::var("XODUS_ACCOUNT_ID") {
+        Ok(id) if !id.is_empty() => match profile.session_for_account(&id) {
+            Ok(session) => session,
+            Err(_) => {
+                eprintln!(
+                    "The selected session account is unavailable. Refresh the launcher's accounts; no other account was selected."
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("Invalid XODUS_ACCOUNT_ID.");
+            return ExitCode::FAILURE;
+        }
+        _ => profile,
+    };
+    let tokens = Arc::new(tokens);
     xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens).await;
     let xodus::models::secrets::Token::Legacy(device_token) =
         tokens.get_device_sts_token().unwrap()

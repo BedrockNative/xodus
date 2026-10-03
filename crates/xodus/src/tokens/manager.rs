@@ -8,7 +8,7 @@ use crate::models::xbox::XstsResponse;
 use crate::tokens::backend::{KeychainBackend, MemoryBackend};
 use crate::tokens::store::{ExpiringTokenBackend, TokenBackend, TokenStoreError};
 
-mod keys {
+pub(crate) mod keys {
     pub const DEV_LICENSE: &str = "dev_license";
     pub const DEVICE_TOKENS: &str = "device-tokens";
     pub const USER_TOKENS: &str = "user-tokens";
@@ -19,6 +19,39 @@ mod keys {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[test]
+    fn session_accounts_do_not_change_profile_or_other_sessions() {
+        let profile = TokenManager::with_memory();
+        sign_in(&profile, "first");
+        sign_in(&profile, "second");
+        let accounts = profile.accounts().unwrap();
+        let first = accounts.iter().find(|a| a.username == "first").unwrap();
+        let second = accounts.iter().find(|a| a.username == "second").unwrap();
+        let session_a = profile.session_for_account(&first.id).unwrap();
+        let session_b = profile.session_for_account(&second.id).unwrap();
+        session_a
+            .save_user_token(
+                PASSPORT_STS.into(),
+                Token::Compact("refreshed-first".into()),
+            )
+            .unwrap();
+        assert_eq!(profile.get_user().unwrap().puid, "second");
+        assert_eq!(session_a.get_user().unwrap().puid, "first");
+        assert_eq!(session_b.get_user().unwrap().puid, "second");
+        assert!(
+            matches!(session_b.get_user_sts_token().unwrap(), Token::Compact(t) if t == "test-second")
+        );
+        assert!(
+            matches!(profile.session_for_account(&first.id).unwrap().get_user_sts_token().unwrap(), Token::Compact(t) if t == "test-first")
+        );
+        let content = uuid::Uuid::from_u128(42);
+        profile.save_installed_key(content, &[5; 32]).unwrap();
+        assert_eq!(session_a.installed_key(content).unwrap(), [5; 32]);
+        assert!(profile.session_for_account("missing").is_err());
+        assert_eq!(profile.get_user().unwrap().puid, "second");
+        assert_eq!(profile.accounts().unwrap().len(), 2);
+    }
 
     fn sign_in(tokens: &TokenManager, id: &str) {
         tokens
@@ -226,6 +259,28 @@ impl TokenManager {
             Arc::new(MemoryBackend::default()),
             Arc::new(MemoryBackend::default()),
         )
+    }
+
+    /// Pin one saved identity without changing the profile's current account.
+    /// Refreshed user tokens stay process-local to this service session.
+    pub fn session_for_account(&self, id: &str) -> Result<Self, TokenStoreError> {
+        let accounts = self.ownership_accounts()?;
+        let account = accounts
+            .iter()
+            .find(|a| account_id(&a.user) == id)
+            .ok_or(TokenStoreError::NotFound)?;
+        let session = Self::new(
+            Arc::new(crate::tokens::backend::session::SessionBackend {
+                profile: self.persistent.clone(),
+                identity: MemoryBackend::default(),
+            }),
+            Arc::new(MemoryBackend::default()),
+        );
+        session
+            .persistent
+            .set(keys::SAVED_ACCOUNTS, &serde_json::to_vec(&[account])?)?;
+        session.activate_account(Some(account))?;
+        Ok(session)
     }
 
     pub fn remove_persistent(&self) -> Result<(), TokenStoreError> {
