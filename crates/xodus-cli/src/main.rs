@@ -98,6 +98,12 @@ enum SubCommand {
             help = "Use only the license saved by install-owned; never acquire a new license"
         )]
         offline_license: bool,
+        #[arg(
+            last = true,
+            value_name = "GAME_ARGUMENT",
+            help = "Arguments passed literally to the game after -- (no shell expansion)"
+        )]
+        arguments: Vec<std::ffi::OsString>,
     },
     #[command(about = "Generate or decrypt base64-encoded CLEP challenge data")]
     Clep {
@@ -355,7 +361,22 @@ async fn main() -> ExitCode {
             exe,
             market,
             offline_license,
-        } => commands::run::run(&client, &tokens, source, wine, exe, market, offline_license).await,
+            arguments,
+        } => {
+            commands::run::run(
+                &client,
+                &tokens,
+                commands::run::RunOptions {
+                    source,
+                    wine,
+                    exe,
+                    market,
+                    offline_license,
+                    arguments,
+                },
+            )
+            .await
+        }
         SubCommand::Clep { action } => match action {
             ClepAction::Generate {
                 smbios,
@@ -369,4 +390,56 @@ async fn main() -> ExitCode {
     xodus::secrets::destroy_secrets();
 
     code
+}
+
+#[cfg(all(test, unix))]
+mod launch_arguments_tests {
+    use super::*;
+
+    #[test]
+    fn arguments_after_separator_are_not_xodus_options() {
+        let args = CliArgs::try_parse_from([
+            "xodus-cli",
+            "run",
+            "/game",
+            "/wine",
+            "--offline-license",
+            "--",
+            "--help",
+            "two words",
+            "",
+            "$(echo nope)",
+        ])
+        .unwrap();
+        let SubCommand::Run {
+            offline_license,
+            arguments,
+            ..
+        } = args.command
+        else {
+            panic!("Expected run");
+        };
+        assert!(offline_license);
+        assert_eq!(
+            arguments,
+            ["--help", "two words", "", "$(echo nope)"].map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn existing_run_without_game_arguments_is_unchanged() {
+        let args =
+            CliArgs::try_parse_from(["xodus-cli", "run", "/game", "/wine", "--offline-license"])
+                .unwrap();
+        let SubCommand::Run {
+            offline_license,
+            arguments,
+            ..
+        } = args.command
+        else {
+            panic!("Expected run");
+        };
+        assert!(offline_license);
+        assert!(arguments.is_empty());
+    }
 }

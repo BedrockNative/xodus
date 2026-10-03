@@ -112,15 +112,24 @@ async fn prepare(_lfiles: &HashMap<String, SegmentFile>) -> (impl AsyncFnOnce(),
     (async || {}, "".to_owned())
 }
 
-pub async fn run(
-    client: &reqwest::Client,
-    tokens: &TokenManager,
-    source: String,
-    wine: String,
-    exe: Option<String>,
-    market: Option<String>,
-    offline_license: bool,
-) -> ExitCode {
+pub struct RunOptions {
+    pub source: String,
+    pub wine: String,
+    pub exe: Option<String>,
+    pub market: Option<String>,
+    pub offline_license: bool,
+    pub arguments: Vec<std::ffi::OsString>,
+}
+
+pub async fn run(client: &reqwest::Client, tokens: &TokenManager, options: RunOptions) -> ExitCode {
+    let RunOptions {
+        source,
+        wine,
+        exe,
+        market,
+        offline_license,
+        arguments,
+    } = options;
     let mut lfiles: HashMap<String, SegmentFile> = HashMap::new();
 
     let out: &Path = Path::new(&source);
@@ -250,9 +259,7 @@ pub async fn run(
         return ExitCode::FAILURE;
     };
 
-    let mut wn = Command::new(wine)
-        .arg(nt_entry)
-        .env("WINE_DLL_FILE_MAP", env_value)
+    let mut wn = game_command(&wine, &nt_entry, &env_value, &arguments)
         .spawn()
         .unwrap();
 
@@ -270,4 +277,55 @@ pub async fn run(
     cleanup().await;
 
     ExitCode::from(status.code().map(|c| c as u8).unwrap_or(0))
+}
+
+fn game_command(
+    wine: &str,
+    executable: &str,
+    mapping: &str,
+    arguments: &[std::ffi::OsString],
+) -> Command {
+    let mut command = Command::new(wine);
+    command
+        .arg(executable)
+        .args(arguments)
+        .env("WINE_DLL_FILE_MAP", mapping);
+    command
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn game_arguments_are_literal_and_follow_the_executable() {
+        let arguments: Vec<OsString> = [
+            "--flag",
+            "a value with spaces",
+            "$(touch nope); $HOME",
+            "",
+            "--offline-license",
+            "世界",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let command = game_command("/private/wine", "game.exe", "test-map", &arguments);
+        let command = command.as_std();
+        let expected: Vec<OsString> = std::iter::once(OsString::from("game.exe"))
+            .chain(arguments)
+            .collect();
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        assert_eq!(command.get_program(), "/private/wine");
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "WINE_DLL_FILE_MAP")
+                .unwrap()
+                .1
+                .unwrap(),
+            "test-map"
+        );
+    }
 }

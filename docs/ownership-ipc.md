@@ -36,6 +36,11 @@ xodus-cli run GAME_DIRECTORY /path/to/wine --offline-license --exe 'Minecraft.Wi
 ```
 
 For a local package, pass `file:///absolute/path/game.msixvc` as the source.
+Starting with Xodus 0.3.0, `run` accepts game arguments after `--`, for example
+`xodus-cli run GAME_DIRECTORY /path/to/wine --offline-license --exe GAME.exe -- ARGUMENT VALUE`.
+They are passed as separate literal OS arguments after the game executable, never
+through a shell. The caller is responsible for supplying flags supported by the game.
+The retained-license and encrypted-file mapping behavior is unchanged.
 `install-owned` checks purchase through IPC **before** opening/downloading the
 package, creating the destination, or acquiring a content key. The caller must
 supply the Store product matching the package (not a bundle or subscription ID).
