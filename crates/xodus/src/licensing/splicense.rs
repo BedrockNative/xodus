@@ -86,6 +86,7 @@ pub struct SPLicense {
     pub hardware_id: Vec<u8>,
     pub polling_time: u32,
     pub license_expiration_time: u32,
+    pub basic_policies: u16,
 }
 
 #[derive(FromBytes, IntoBytes)]
@@ -305,7 +306,7 @@ impl SPLicense {
                 let _unknown1: [u8; 2] = read_array(&mut reader)?;
                 let _unknown2: [u8; 2] = read_array(&mut reader)?;
                 let _unknown3: [u8; 4] = read_array(&mut reader)?;
-                let _unknown4: [u8; 2] = read_array(&mut reader)?;
+                self.basic_policies = read_u16(&mut reader)?;
             }
             Ok(BlockId::LicenseEntryIds) => {
                 let count = read_u16(&mut reader)?;

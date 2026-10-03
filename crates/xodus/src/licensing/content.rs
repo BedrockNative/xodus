@@ -20,8 +20,8 @@ pub enum LicenseContentError {
     /// not covered by the account's current subscription tier).
     #[error("not entitled to this content: {description}")]
     NotEntitled { description: String },
-    #[error("invalid content license response")]
-    InvalidResponse,
+    #[error("invalid content license response ({0})")]
+    InvalidResponse(&'static str),
 }
 
 // we might need a bump in xal-rs concerning reqwest,
@@ -46,7 +46,7 @@ pub async fn get_license_content(
     .await
 }
 
-/// Request a runtime lease rather than only a content-decryption key.
+/// Request the entitlement license and runtime lease together.
 pub async fn get_license_information(
     client: &reqwest::Client,
     device_ms_token: String,
@@ -89,7 +89,7 @@ async fn request_license_content(
             client_challenge: "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiID8+PENsaWVudENoYWxsZW5nZSB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIiB4bWxuczp4c2Q9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxucz0iaHR0cDovL3NjaGVtYXMubWljcm9zb2Z0LmNvbS9vbmVzdG9yZS9zZWN1cml0eS9ta21zL0xpY1JlcS92MSIgVmVyc2lvbj0iMiI+PExpY2Vuc2VQcm90b2NvbFZlcnNpb24+NTwvTGljZW5zZVByb3RvY29sVmVyc2lvbj48U2lnbmluZ0tleVZlcnNpb24+MTwvU2lnbmluZ0tleVZlcnNpb24+PENsaWVudFZlcnNpb24+MjwvQ2xpZW50VmVyc2lvbj48L0NsaWVudENoYWxsZW5nZT4=".into(),
             concurrency_mode: "Rude".into(),
             license_version: 4,
-            need_key: key_only,
+            need_key: true,
             key_only,
             device_context: DeviceContext::default(),
             users: HashMap::from_iter(
@@ -121,14 +121,16 @@ async fn request_license_content(
     let license = if key_only {
         content.keys.first()
     } else {
-        content.leases.first().or_else(|| content.keys.first())
+        content.keys.first().or_else(|| content.leases.first())
     };
-    let license = &license.ok_or(LicenseContentError::InvalidResponse)?.value;
+    let license = &license
+        .ok_or(LicenseContentError::InvalidResponse("missing key or lease"))?
+        .value;
     let license = BASE64_STANDARD
         .decode(license)
-        .map_err(|_| LicenseContentError::InvalidResponse)?;
+        .map_err(|_| LicenseContentError::InvalidResponse("license base64"))?;
     let license = quick_xml::de::from_reader::<_, License>(license.as_slice())
-        .map_err(|_| LicenseContentError::InvalidResponse)?;
+        .map_err(|_| LicenseContentError::InvalidResponse("license XML"))?;
     Ok((content, license))
 }
 

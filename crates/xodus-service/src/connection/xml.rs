@@ -154,9 +154,7 @@ pub async fn parse_message(
         }
         XodusMessageType::XboxTokenRequest => {
             let req: XboxTokenRequest = quick_xml::de::from_reader(buffer.as_slice())?;
-            if req.client_id.is_empty() || req.title_id <= 0 {
-                return Err("Application identity is required".into());
-            }
+            let client_id = req.resolved_client_id()?.to_owned();
             let uri = reqwest::Url::parse(&req.relying_party)?;
             if !matches!(uri.scheme(), "https" | "wss")
                 || uri.host_str().is_none()
@@ -176,13 +174,13 @@ pub async fn parse_message(
             let user = context.tokens().get_user()?;
             // Do not reuse a session after local sign-out removed the credentials.
             context.tokens().get_user_sts_token()?;
-            let slot = xodus::auth::broker_session_slot(&user.puid, &req.client_id, req.title_id);
+            let slot = xodus::auth::broker_session_slot(&user.puid, &client_id, req.title_id);
             let mut cached = slot.lock().await;
             if !cached.as_ref().is_some_and(|session| session.is_valid()) {
                 let (auth, sisu, device) = xodus::auth::do_sisu(
                     &context.client,
                     context.tokens(),
-                    &req.client_id,
+                    &client_id,
                     req.title_id,
                 )
                 .await

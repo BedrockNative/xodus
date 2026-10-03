@@ -179,6 +179,7 @@ pub enum LicenseType {
     User,
     Full,
     KeyHolder,
+    Lease,
 }
 
 #[derive(Deserialize, Debug)]
@@ -201,4 +202,24 @@ pub struct ServerInfo {
     pub server_time: String,
     #[serde(rename = "$value")]
     pub id: String,
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_runtime_lease() {
+        let xml = r#"<License><SPLicenseBlock>dGVzdA==</SPLicenseBlock><LicenseInfo Type="Lease" LicenseUsage="Online"/><Binding Binding_Type="Device"/></License>"#;
+        let license: License = quick_xml::de::from_str(xml).unwrap();
+        assert!(matches!(
+            license.license_info.license_type,
+            LicenseType::Lease
+        ));
+        assert!(matches!(
+            license.license_info.license_usage,
+            Some(LicenseUsage::Online)
+        ));
+        assert_eq!(license.splicense_block, "dGVzdA==");
+    }
 }

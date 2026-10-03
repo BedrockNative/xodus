@@ -498,17 +498,16 @@ async fn request_store(
         )
         .await
         {
-            Ok((_, license)) => {
-                let license = super::splicense::SPLicense::parse_base64(&license.splicense_block)
-                    .map_err(|_| StoreError::InvalidResponse("content license parse"))?;
-                let package = license.package_name.trim_end_matches('\0');
-                if !package.eq_ignore_ascii_case(&request.package_family_name) {
-                    return Err(StoreError::InvalidResponse("content license package"));
-                }
-                let expiry = i64::from(license.license_expiration_time);
-                reply.is_active = expiry > chrono::Utc::now().timestamp();
-                reply.expiration_date = (expiry + 11_644_473_600) * 10_000_000;
-                // ExpirationDate is not inferred from receipt purchase time.
+            Ok((content, license)) => {
+                let (active, expiration) = runtime_license_state(
+                    &license,
+                    &content,
+                    &request.package_family_name,
+                    chrono::Utc::now().timestamp(),
+                )?;
+                reply.is_active = active;
+                reply.is_trial = false;
+                reply.expiration_date = expiration;
             }
             Err(super::content::LicenseContentError::NotEntitled { .. }) => reply.is_active = false,
             Err(super::content::LicenseContentError::Request(error)) => {
@@ -520,8 +519,8 @@ async fn request_store(
                     StoreError::Transport
                 });
             }
-            Err(super::content::LicenseContentError::InvalidResponse) => {
-                return Err(StoreError::InvalidResponse("runtime lease missing"));
+            Err(super::content::LicenseContentError::InvalidResponse(reason)) => {
+                return Err(StoreError::InvalidResponse(reason));
             }
         }
     }
@@ -529,9 +528,163 @@ async fn request_store(
     Ok(reply)
 }
 
+// A content-key license establishes entitlement; a lease alone does not.
+// Only fresh online leases are accepted here. Offline lease renewal semantics
+// are deliberately not inferred from the renewal-period field.
+fn runtime_license_state(
+    license: &crate::models::devicecredential::License,
+    content: &crate::models::licensing::LicenseContent,
+    pfn: &str,
+    now: i64,
+) -> Result<(bool, i64), StoreError> {
+    use crate::models::devicecredential::{License, LicenseType};
+    if !matches!(license.license_info.license_type, LicenseType::Full) {
+        return Err(StoreError::Unsupported);
+    }
+    let decoded = super::splicense::SPLicense::parse_base64(&license.splicense_block)
+        .map_err(|_| StoreError::InvalidResponse("content license parse"))?;
+    if !decoded
+        .package_name
+        .trim_end_matches('\0')
+        .eq_ignore_ascii_case(pfn)
+    {
+        return Err(StoreError::InvalidResponse("content license package"));
+    }
+    let mut expiry = i64::from(decoded.license_expiration_time);
+    let mut expired = decoded.basic_policies & 4 != 0;
+    if decoded.basic_policies & 1 != 0
+        || license
+            .binding
+            .lease_required
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+    {
+        let mut valid_lease = false;
+        for entry in &content.leases {
+            let xml = BASE64_STANDARD
+                .decode(&entry.value)
+                .map_err(|_| StoreError::InvalidResponse("lease base64"))?;
+            let lease: License = quick_xml::de::from_reader(xml.as_slice())
+                .map_err(|_| StoreError::InvalidResponse("lease XML"))?;
+            let decoded_lease = super::splicense::SPLicense::parse_base64(&lease.splicense_block)
+                .map_err(|_| StoreError::InvalidResponse("lease parse"))?;
+            let issued = lease
+                .license_info
+                .issued_date
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.timestamp());
+            if matches!(lease.license_info.license_type, LicenseType::Lease)
+                && decoded_lease
+                    .package_name
+                    .trim_end_matches('\0')
+                    .eq_ignore_ascii_case(pfn)
+                && issued.is_some_and(|t| t <= now + 60 && t >= now - 300)
+                && (decoded_lease.license_expiration_time == 0
+                    || i64::from(decoded_lease.license_expiration_time) > now)
+            {
+                valid_lease = true;
+                // The parent unlock license requires the accompanying runtime
+                // lease. Its key expiration is not the application's expiry.
+                expiry = i64::from(decoded_lease.license_expiration_time);
+                expired |= decoded_lease.basic_policies & 4 != 0;
+                break;
+            }
+        }
+        if !valid_lease {
+            return Err(StoreError::InvalidResponse("fresh runtime lease missing"));
+        }
+    }
+    let begin = license
+        .license_info
+        .begin_date
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|_| StoreError::InvalidResponse("license begin date"))?
+        .map(|t| t.timestamp());
+    // Full content licenses without an absolute expiry are non-expiring.
+    // Store's legacy receipt can still describe an earlier trial purchase.
+    let expiration = if expiry == 0 {
+        2_650_467_743_999_999_999
+    } else {
+        (expiry + 11_644_473_600) * 10_000_000
+    };
+    Ok((
+        !expired && begin.is_none_or(|t| t <= now) && (expiry == 0 || expiry > now),
+        expiration,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn license_fixture(
+        kind: &str,
+        package: &str,
+        expiry: u32,
+        policies: u16,
+        lease_required: bool,
+        issued: &str,
+    ) -> crate::models::devicecredential::License {
+        let mut block = vec![0u8; 8];
+        let package: Vec<u8> = package.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        for (id, data) in [
+            (0xceu32, package),
+            (0x20, expiry.to_le_bytes().to_vec()),
+            (0xc9, {
+                let mut v = vec![0u8; 8];
+                v.extend(policies.to_le_bytes());
+                v
+            }),
+        ] {
+            block.extend(id.to_le_bytes());
+            block.extend((data.len() as u32).to_le_bytes());
+            block.extend(data);
+        }
+        let xml = format!(
+            r#"<License><SPLicenseBlock>{}</SPLicenseBlock><LicenseInfo Type="{kind}" LicenseUsage="Online"><IssuedDate>{issued}</IssuedDate></LicenseInfo><Binding Binding_Type="Device"><LeaseRequired>{lease_required}</LeaseRequired></Binding></License>"#,
+            BASE64_STANDARD.encode(block)
+        );
+        quick_xml::de::from_str(&xml).unwrap()
+    }
+
+    #[test]
+    fn store_runtime_license_requires_entitlement_and_fresh_matching_lease() {
+        use crate::models::licensing::{LicenseContent, LicenseKeys};
+        let now = 1_800_000_000;
+        let issued = chrono::DateTime::from_timestamp(now, 0)
+            .unwrap()
+            .to_rfc3339();
+        let pfn = "Example.App_abc";
+        let mut content = LicenseContent {
+            keys: vec![],
+            leases: vec![],
+        };
+        let full = license_fixture("Full", pfn, now as u32, 11, true, &issued);
+        assert!(runtime_license_state(&full, &content, pfn, now).is_err());
+        let lease = license_fixture("Lease", pfn, 0, 0, false, &issued);
+        assert!(runtime_license_state(&lease, &content, pfn, now).is_err());
+        let xml = format!(
+            r#"<License><SPLicenseBlock>{}</SPLicenseBlock><LicenseInfo Type="Lease"><IssuedDate>{issued}</IssuedDate></LicenseInfo><Binding Binding_Type="Device"/></License>"#,
+            lease.splicense_block
+        );
+        content.leases.push(LicenseKeys {
+            value: BASE64_STANDARD.encode(xml),
+        });
+        assert!(runtime_license_state(&full, &content, pfn, now).unwrap().0);
+        assert!(runtime_license_state(&full, &content, "Other.App_abc", now).is_err());
+        assert!(runtime_license_state(&full, &content, pfn, now + 301).is_err());
+        let expired = license_fixture("Full", pfn, 0, 4, false, &issued);
+        assert!(
+            !runtime_license_state(&expired, &content, pfn, now)
+                .unwrap()
+                .0
+        );
+        let timed = license_fixture("Full", pfn, (now - 1) as u32, 0, false, &issued);
+        assert!(!runtime_license_state(&timed, &content, pfn, now).unwrap().0);
+    }
+
     #[test]
     fn store_request_rejects_paths_and_foreign_operations() {
         let mut r = StoreRequest {
