@@ -1,18 +1,31 @@
+use sha2::{Digest, Sha256};
+
 pub static SERVICE_NAME: &str = "Xodus Service";
 
 pub fn init_secrets() -> Result<(), keyring_core::Error> {
+    // Validate an explicit profile before touching credential storage.
+    let profile = crate::config::directory()
+        .map_err(|error| keyring_core::Error::NoStorageAccess(Box::new(error)))?;
+
     #[cfg(feature = "key-chain-file")]
     {
+        let path = profile
+            .map(|directory| directory.join(".xodus-keyring.ron"))
+            .unwrap_or_else(secrets_backing_file);
         let store = keyring_core::sample::Store::new_with_backing(
-            secrets_backing_file()
-                .to_str()
-                .expect("Invalid secrets backing path"),
+            path.to_str().ok_or_else(|| {
+                keyring_core::Error::Invalid(
+                    "XODUS_CONFIG_DIR".into(),
+                    "File-backed storage requires a UTF-8 path".into(),
+                )
+            })?,
         )?;
         keyring_core::set_default_store(store);
     }
 
     #[cfg(not(feature = "key-chain-file"))]
     {
+        let _ = profile;
         #[cfg(target_os = "linux")]
         {
             keyring_core::set_default_store(dbus_secret_service_keyring_store::Store::new()?);
@@ -36,7 +49,19 @@ pub fn init_secrets() -> Result<(), keyring_core::Error> {
 }
 
 pub fn get_entry(user: &str) -> Result<keyring_core::Entry, keyring_core::Error> {
-    keyring_core::Entry::new(SERVICE_NAME, user)
+    let profile = crate::config::directory()
+        .map_err(|error| keyring_core::Error::NoStorageAccess(Box::new(error)))?;
+    let service = match profile {
+        Some(directory) => {
+            let scope: String = Sha256::digest(directory.as_os_str().as_encoded_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{SERVICE_NAME}:{scope}")
+        }
+        None => SERVICE_NAME.to_string(),
+    };
+    keyring_core::Entry::new(&service, user)
 }
 
 pub fn destroy_secrets() {

@@ -49,7 +49,11 @@ async fn main() {
 
     let runtime_dir = utils::get_runtime_dir();
     let cancellation = CancellationToken::new();
-    let socket_path = format!("{runtime_dir}/xodus.sock");
+    let socket_name = std::env::var("XODUS_SOCK_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "xodus.sock".to_string());
+    let socket_path = format!("{runtime_dir}/{socket_name}");
     let trigger = cancellation.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
