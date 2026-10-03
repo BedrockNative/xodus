@@ -289,7 +289,7 @@ async fn main() -> ExitCode {
     }
 
     let code = match args.command {
-        SubCommand::Accounts { action, .. } => commands::accounts::run(&tokens, action),
+        SubCommand::Accounts { action, .. } => commands::accounts::run(&tokens, action).await,
         #[cfg(unix)]
         SubCommand::InstallOwned {
             product: _,
