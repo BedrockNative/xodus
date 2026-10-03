@@ -1,5 +1,16 @@
 use sha2::{Digest, Sha256};
 
+#[cfg(all(target_os = "linux", not(feature = "key-chain-file")))]
+mod linux;
+
+/// Only an explicit login can initialize a missing desktop keyring. Passwords
+/// are entered into the Secret Service's own prompt, never the CLI or launcher.
+pub fn prepare_login() -> Result<(), String> {
+    #[cfg(all(target_os = "linux", not(feature = "key-chain-file")))]
+    linux::prepare().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub static SERVICE_NAME: &str = "Xodus Service";
 
 pub fn init_secrets() -> Result<(), keyring_core::Error> {
@@ -12,14 +23,13 @@ pub fn init_secrets() -> Result<(), keyring_core::Error> {
         let path = profile
             .map(|directory| directory.join(".xodus-keyring.ron"))
             .unwrap_or_else(secrets_backing_file);
-        let store = keyring_core::sample::Store::new_with_backing(
-            path.to_str().ok_or_else(|| {
+        let store =
+            keyring_core::sample::Store::new_with_backing(path.to_str().ok_or_else(|| {
                 keyring_core::Error::Invalid(
                     "XODUS_CONFIG_DIR".into(),
                     "File-backed storage requires a UTF-8 path".into(),
                 )
-            })?,
-        )?;
+            })?)?;
         keyring_core::set_default_store(store);
     }
 

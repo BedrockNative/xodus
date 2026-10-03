@@ -1,6 +1,6 @@
 [package]
 name = "xodus-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 default-run = "xodus-cli"
 
@@ -32,3 +32,6 @@ nix = "0.31.3"
 
 [features]
 tokio_console = ["dep:console-subscriber"]
+
+[dev-dependencies]
+quick-xml = { version = "0.42.0", features = ["serialize"] }

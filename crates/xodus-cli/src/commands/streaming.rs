@@ -30,15 +30,27 @@ enum ProgressEvent {
     UpdateStatus { name: String },
 }
 
+pub struct InstallOptions {
+    pub source: String,
+    pub destination: String,
+    pub try_skip_ntfs: bool,
+    pub parallel: Option<usize>,
+    pub market: Option<String>,
+    pub save_launch_license: bool,
+}
+
+struct Input<R> {
+    reader: R,
+    length: u64,
+    url: String,
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    source: String,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
+    options: InstallOptions,
 ) -> ExitCode {
+    let source = options.source.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(256);
     if source.starts_with("file://") {
         let fsrc = source.strip_prefix("file://").unwrap_or_default();
@@ -59,23 +71,22 @@ pub async fn run(
         run_cli_reader(
             client,
             tokens,
-            destination,
-            try_skip_ntfs,
-            parallel,
-            market,
-            f,
-            l,
-            &source,
+            options,
+            Input {
+                reader: f,
+                length: l,
+                url: source,
+            },
             &tx,
             rx,
         )
-        .await;
+        .await
     } else {
         let vurl = if source.starts_with("http://") || source.starts_with("https://") {
             source
         } else {
             let content_id = if Uuid::try_parse(&source).is_err() {
-                let content_id_task = get_content_id(client, source, market.clone()).await;
+                let content_id_task = get_content_id(client, source, options.market.clone()).await;
                 let Ok(content_id) = content_id_task else {
                     let Err(err) = content_id_task else {
                         eprintln!("Unknown Error");
@@ -135,38 +146,31 @@ pub async fn run(
         run_cli_reader(
             client,
             tokens,
-            destination,
-            try_skip_ntfs,
-            parallel,
-            market,
-            http_file,
-            l,
-            url,
+            options,
+            Input {
+                reader: http_file,
+                length: l,
+                url: vurl,
+            },
             &tx,
             rx,
         )
-        .await;
+        .await
     }
-
-    ExitCode::SUCCESS
 }
 
 async fn run_cli_reader<Reader>(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
-    reader: Reader,
-    l: u64,
-    url: &str,
+    options: InstallOptions,
+    input: Input<Reader>,
     tx: &Sender<ProgressEvent>,
     mut rx: Receiver<ProgressEvent>,
-) -> ()
+) -> ExitCode
 where
     Reader: AsyncRead + Unpin,
 {
+    let l = input.length;
     tokio::spawn(async move {
         let multi_progress = MultiProgress::new();
         let total_progess = multi_progress.add(ProgressBar::new(l).with_style(
@@ -210,37 +214,26 @@ where
 
         total_progess.abandon();
     });
-    run_reader(
-        client,
-        tokens,
-        destination,
-        try_skip_ntfs,
-        parallel,
-        market,
-        reader,
-        l,
-        url,
-        tx,
-    )
-    .await
+    run_reader(client, tokens, &options, input, tx).await
 }
 
 async fn run_reader<Reader>(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
-    reader: Reader,
-    l: u64,
-    url: &str,
+    options: &InstallOptions,
+    input: Input<Reader>,
     tx: &Sender<ProgressEvent>,
-) -> ()
+) -> ExitCode
 where
     Reader: AsyncRead + Unpin,
 {
-    let out: &Path = Path::new(&destination);
+    let Input {
+        reader,
+        length: l,
+        url,
+    } = input;
+    let url = url.as_str();
+    let out: &Path = Path::new(&options.destination);
 
     std::fs::create_dir_all(out).expect("ok");
 
@@ -268,7 +261,7 @@ where
         }
     }
 
-    if !try_skip_ntfs || rfiles.is_empty() {
+    if !options.try_skip_ntfs || rfiles.is_empty() {
         tx.send(ProgressEvent::UpdateStatus {
             name: "Downloading ntfs...".to_owned(),
         })
@@ -310,12 +303,12 @@ where
         client,
         tokens,
         remote_xvd.content_id().to_string(),
-        market.unwrap_or("neutral".to_string()),
+        options.market.clone().unwrap_or("neutral".to_string()),
     )
     .await;
     if let Err(err) = license {
         eprintln!("{}", err);
-        return;
+        return ExitCode::FAILURE;
     }
     let (key, game_splicense) = license.unwrap();
     if game_splicense.content_keys.len() != 1 {
@@ -323,10 +316,10 @@ where
             "unexpected number of content keys {}",
             game_splicense.content_keys.len()
         );
-        return;
+        return ExitCode::FAILURE;
     }
     let Some((_, content_key)) = game_splicense.content_keys.into_iter().next() else {
-        return;
+        return ExitCode::FAILURE;
     };
 
     let full_key = content_key.unpack(&key).expect("failed to unpack");
@@ -352,7 +345,7 @@ where
                 out.display(),
                 err
             );
-            return;
+            return ExitCode::FAILURE;
         }
     };
 
@@ -364,7 +357,7 @@ where
             available_free_space,
             total_size
         );
-        return;
+        return ExitCode::FAILURE;
     }
 
     tx.send(ProgressEvent::UpdateRemaining {
@@ -396,7 +389,7 @@ where
             })
             .enumerate(),
     )
-    .for_each_concurrent(parallel.unwrap_or(4), |(id, job)| {
+    .for_each_concurrent(options.parallel.unwrap_or(4), |(id, job)| {
         let tx = tx.clone();
         let client = client.clone();
         async move {
@@ -456,6 +449,12 @@ where
     })
     .await;
 
+    if options.save_launch_license {
+        tokens
+            .save_installed_key(remote_xvd.content_id(), &full_key)
+            .expect("Unable to save the installed license to the profile keychain");
+    }
     std::fs::remove_file(&final_path).ok();
     std::fs::rename(&cache_path, &final_path).expect("ok");
+    ExitCode::SUCCESS
 }

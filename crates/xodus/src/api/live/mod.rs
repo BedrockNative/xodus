@@ -8,6 +8,7 @@ use crate::models::secrets::{LegacyToken, Token};
 use crate::models::soap;
 
 mod rst;
+pub mod store;
 mod utils;
 
 pub const XML_HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;

@@ -13,6 +13,20 @@ mod webview;
 
 #[derive(Subcommand)]
 enum SubCommand {
+    #[cfg(unix)]
+    #[command(about = "Verify purchase over IPC, then install and save the local launch license")]
+    InstallOwned {
+        product: String,
+        source: String,
+        destination: String,
+        #[arg(short, long)]
+        market: Option<String>,
+    },
+    #[cfg(unix)]
+    #[command(about = "Check a Store purchase through the running Xodus service (JSON output)")]
+    CheckOwnership {
+        product: String,
+    },
     #[command(about = "Download msixvc or xsp files fo given game")]
     Download {
         product: String,
@@ -79,6 +93,11 @@ enum SubCommand {
         exe: Option<String>,
         #[arg(short, long)]
         market: Option<String>,
+        #[arg(
+            long,
+            help = "Use only the license saved by install-owned; never acquire a new license"
+        )]
+        offline_license: bool,
     },
     #[command(about = "Generate or decrypt base64-encoded CLEP challenge data")]
     Clep {
@@ -150,7 +169,72 @@ async fn main() -> ExitCode {
         .unwrap();
     let args = CliArgs::parse();
 
-    xodus::secrets::init_secrets().expect("Unable to initialize credentials");
+    #[cfg(unix)]
+    if let SubCommand::InstallOwned { product, .. } = &args.command {
+        use xodus::licensing::ownership::{OwnershipRequest, OwnershipStatus};
+        match xodus::ipc::check_ownership(&OwnershipRequest {
+            product_id: product.clone(),
+        })
+        .await
+        {
+            Ok(response) if response.status == OwnershipStatus::Purchased => {}
+            Ok(response) => {
+                eprintln!(
+                    "Purchase not verified: {:?}. No game data was downloaded or decrypted.",
+                    response.status
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(_) => {
+                eprintln!(
+                    "Purchase verification unavailable. Start the matching isolated Xodus service."
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    if let SubCommand::CheckOwnership { product } = &args.command {
+        use xodus::licensing::ownership::{OwnershipRequest, OwnershipStatus};
+        return match xodus::ipc::check_ownership(&OwnershipRequest {
+            product_id: product.clone(),
+        })
+        .await
+        {
+            Ok(response) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&response).expect("Serializable ownership response")
+                );
+                match response.status {
+                    OwnershipStatus::Purchased => ExitCode::SUCCESS,
+                    OwnershipStatus::NotOwned => ExitCode::from(2),
+                    OwnershipStatus::NoAccount => ExitCode::from(3),
+                    _ => ExitCode::from(4),
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "Ownership query failed. Check the service version and isolated socket configuration."
+                );
+                ExitCode::from(4)
+            }
+        };
+    }
+
+    if matches!(args.command, SubCommand::Login)
+        && let Err(error) = xodus::secrets::prepare_login()
+    {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    if xodus::secrets::init_secrets().is_err() {
+        eprintln!(
+            "Unable to access secure credential storage. Retry Sign in to prepare or unlock your desktop keyring."
+        );
+        return ExitCode::FAILURE;
+    }
     let tokens = TokenManager::with_keychain_and_memory();
 
     // Clep/SpLicense are pure local data transforms and Logout only removes
@@ -159,15 +243,50 @@ async fn main() -> ExitCode {
     // matters in practice: on a session with no usable secret-service
     // keychain, provisioning fails outright, which previously meant even
     // these fully offline commands were unusable.
-    let needs_device_credentials = !matches!(
+    let mut needs_device_credentials = !matches!(
         args.command,
         SubCommand::Clep { .. } | SubCommand::SpLicense { .. } | SubCommand::Logout { .. }
     );
+    #[cfg(unix)]
+    if matches!(
+        args.command,
+        SubCommand::Run {
+            offline_license: true,
+            ..
+        }
+    ) {
+        needs_device_credentials = false;
+    }
     if needs_device_credentials {
         xodus::tokens::device::ensure_device_credentials(&client, &tokens).await;
     }
 
     let code = match args.command {
+        #[cfg(unix)]
+        SubCommand::InstallOwned {
+            product: _,
+            source,
+            destination,
+            market,
+        } => {
+            commands::streaming::run(
+                &client,
+                &tokens,
+                commands::streaming::InstallOptions {
+                    source,
+                    destination,
+                    try_skip_ntfs: false,
+                    parallel: None,
+                    market,
+                    save_launch_license: true,
+                },
+            )
+            .await
+        }
+        #[cfg(unix)]
+        SubCommand::CheckOwnership { .. } => {
+            unreachable!("IPC commands return before initialization")
+        }
         SubCommand::Download {
             product,
             market,
@@ -218,11 +337,14 @@ async fn main() -> ExitCode {
             commands::streaming::run(
                 &client,
                 &tokens,
-                source,
-                destination,
-                try_skip_ntfs,
-                parallel,
-                market,
+                commands::streaming::InstallOptions {
+                    source,
+                    destination,
+                    try_skip_ntfs,
+                    parallel,
+                    market,
+                    save_launch_license: false,
+                },
             )
             .await
         }
@@ -232,7 +354,8 @@ async fn main() -> ExitCode {
             wine,
             exe,
             market,
-        } => commands::run::run(&client, &tokens, source, wine, exe, market).await,
+            offline_license,
+        } => commands::run::run(&client, &tokens, source, wine, exe, market, offline_license).await,
         SubCommand::Clep { action } => match action {
             ClepAction::Generate {
                 smbios,

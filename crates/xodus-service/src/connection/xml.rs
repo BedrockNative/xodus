@@ -29,7 +29,7 @@ pub async fn handle(
         }
     };
 
-    let data = super::encode_message(XML_MAGIC, message_type as u16 + 1, out_buf);
+    let data = xodus::ipc::encode_message(XML_MAGIC, message_type as u16 + 1, &out_buf)?;
     socket.write_all(&data).await
 }
 
@@ -40,6 +40,20 @@ pub async fn parse_message(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     match message_type {
         XodusMessageType::Ping => Ok(buffer),
+        XodusMessageType::OwnershipRequest => {
+            use xodus::licensing::ownership::{
+                self, OwnershipRequest, OwnershipResponse, OwnershipStatus,
+            };
+            let response =
+                match quick_xml::de::from_reader::<_, OwnershipRequest>(buffer.as_slice()) {
+                    Ok(request) => ownership::check(context.tokens(), &request).await,
+                    Err(_) => OwnershipResponse {
+                        product_id: String::new(),
+                        status: OwnershipStatus::InvalidRequest,
+                    },
+                };
+            Ok(quick_xml::se::to_string(&response)?.into_bytes())
+        }
         XodusMessageType::MsaTokenRequest => {
             tracing::debug!("Raw buffer: {buffer:?}");
             let string_buf = std::str::from_utf8(&buffer)?;
@@ -128,5 +142,67 @@ pub async fn parse_message(
             }
         }
         _ => Err("Unimplemented".into()),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::sync::Arc;
+    use xodus::licensing::ownership::{OwnershipResponse, OwnershipStatus};
+    use xodus::models::secrets::LegacyToken;
+    use xodus::tokens::TokenManager;
+
+    fn context() -> SimpleContext {
+        SimpleContext::new(
+            LegacyToken {
+                key_name: None,
+                token: String::new(),
+                binary_secret: None,
+                tpm_key: None,
+                lifetime: soap::Timestamp {
+                    id: None,
+                    created: String::new(),
+                    expires: String::new(),
+                },
+            },
+            Arc::new(TokenManager::with_memory()),
+        )
+    }
+
+    #[tokio::test]
+    async fn no_account_and_malformed_requests_return_typed_responses() {
+        for (payload, expected) in [
+            (
+                "<OwnershipRequest><productId>9NBLGGH2JHXJ</productId></OwnershipRequest>",
+                OwnershipStatus::NoAccount,
+            ),
+            (
+                "<OwnershipRequest><productId>bad</productId></OwnershipRequest>",
+                OwnershipStatus::InvalidRequest,
+            ),
+            ("<broken", OwnershipStatus::InvalidRequest),
+            ("", OwnershipStatus::InvalidRequest),
+        ] {
+            let bytes = parse_message(
+                &mut context(),
+                XodusMessageType::OwnershipRequest,
+                payload.as_bytes().to_vec(),
+            )
+            .await
+            .unwrap();
+            let response: OwnershipResponse = quick_xml::de::from_reader(bytes.as_slice()).unwrap();
+            assert_eq!(response.status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn ping_protocol_is_unchanged() {
+        assert_eq!(
+            parse_message(&mut context(), XodusMessageType::Ping, b"hello".to_vec())
+                .await
+                .unwrap(),
+            b"hello"
+        );
     }
 }

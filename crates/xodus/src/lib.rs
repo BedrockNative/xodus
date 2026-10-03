@@ -3,6 +3,8 @@ pub mod auth;
 pub mod clep;
 pub mod config;
 pub mod hardware;
+#[cfg(unix)]
+pub mod ipc;
 pub mod licensing;
 pub mod models;
 pub mod secrets;

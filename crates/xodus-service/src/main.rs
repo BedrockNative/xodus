@@ -7,13 +7,12 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use xodus::ipc::XML_MAGIC;
 use xodus::tokens::TokenManager;
 
 mod connection;
 mod simple_context;
-mod utils;
 
-const XML_MAGIC: u32 = 0x58445358;
 const PROTO_MAGIC: u32 = 0x58445350;
 
 #[tokio::main]
@@ -47,13 +46,8 @@ async fn main() {
         panic!("Device token isnt legacy")
     };
 
-    let runtime_dir = utils::get_runtime_dir();
     let cancellation = CancellationToken::new();
-    let socket_name = std::env::var("XODUS_SOCK_NAME")
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "xodus.sock".to_string());
-    let socket_path = format!("{runtime_dir}/{socket_name}");
+    let socket_path = xodus::ipc::socket_path().expect("Invalid Xodus socket configuration");
     let trigger = cancellation.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
@@ -65,7 +59,9 @@ async fn main() {
         let listener = UnixListener::bind(&socket_path).expect("Unable to bind to socket");
         let mode = 0o600;
         let perms = Permissions::from_mode(mode);
-        _ = tokio::fs::set_permissions(&socket_path, perms).await;
+        tokio::fs::set_permissions(&socket_path, perms)
+            .await
+            .expect("Unable to restrict socket permissions");
         loop {
             let accept = tokio::select! {
                 r = listener.accept() => r,

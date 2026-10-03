@@ -130,6 +130,13 @@ RUSTFLAGS="--cfg tokio_unstable" cargo run --features tokio_console
 
 ### CLI Usage
 
+For launcher integration, purchase checks over IPC, remembered accounts, and
+playing installed games without another license request, see
+[Purchase verification and local launch licenses](docs/ownership-ipc.md).
+
+`XODUS_SOCKET` can select an absolute socket path; it takes precedence over
+`XODUS_SOCK_NAME` in both the CLI and the service.
+
 ```
 Usage: xodus-cli <COMMAND>
 

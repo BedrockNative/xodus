@@ -77,8 +77,15 @@ pub struct TokenStore {
     pub tokens: std::collections::HashMap<String, Token>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
     pub puid: String,
     pub username: String,
+}
+
+/// Account credentials stay inside the selected Xodus keychain profile.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedAccount {
+    pub user: User,
+    pub sts: Token,
 }

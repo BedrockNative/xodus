@@ -119,6 +119,7 @@ pub async fn run(
     wine: String,
     exe: Option<String>,
     market: Option<String>,
+    offline_license: bool,
 ) -> ExitCode {
     let mut lfiles: HashMap<String, SegmentFile> = HashMap::new();
 
@@ -156,30 +157,42 @@ pub async fn run(
         lfiles.extend(sfiles);
     }
 
-    let license = get_license(
-        client,
-        tokens,
-        xvd.content_id().to_string(),
-        market.unwrap_or("neutral".to_string()),
-    )
-    .await;
-    if let Err(err) = license {
-        eprintln!("{}", err);
-        return ExitCode::FAILURE;
-    }
-    let (key, game_splicense) = license.unwrap();
-    if game_splicense.content_keys.len() != 1 {
-        eprintln!(
-            "unexpected number of content keys {}",
-            game_splicense.content_keys.len()
-        );
-        return ExitCode::FAILURE;
-    }
-    let Some((_, content_key)) = game_splicense.content_keys.into_iter().next() else {
-        return ExitCode::FAILURE;
-    };
+    let full_key = if offline_license {
+        match tokens.installed_key(xvd.content_id()) {
+            Ok(key) => key,
+            Err(_) => {
+                eprintln!(
+                    "No saved installation license in this Xodus profile. Install using install-owned first."
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        let license = get_license(
+            client,
+            tokens,
+            xvd.content_id().to_string(),
+            market.unwrap_or("neutral".to_string()),
+        )
+        .await;
+        if let Err(err) = license {
+            eprintln!("{}", err);
+            return ExitCode::FAILURE;
+        }
+        let (key, game_splicense) = license.unwrap();
+        if game_splicense.content_keys.len() != 1 {
+            eprintln!(
+                "unexpected number of content keys {}",
+                game_splicense.content_keys.len()
+            );
+            return ExitCode::FAILURE;
+        }
+        let Some((_, content_key)) = game_splicense.content_keys.into_iter().next() else {
+            return ExitCode::FAILURE;
+        };
 
-    let full_key = content_key.unpack(&key).expect("failed to unpack");
+        *content_key.unpack(&key).expect("failed to unpack")
+    };
 
     let mut fds = vec![];
 
@@ -195,7 +208,7 @@ pub async fn run(
 
         let mut i = File::open(&source_path).await.unwrap();
 
-        xvd.mount_mem_fd(&mut i, &mut game_exe, file.1, *full_key, |_, _| {})
+        xvd.mount_mem_fd(&mut i, &mut game_exe, file.1, full_key, |_, _| {})
             .await
             .unwrap();
 

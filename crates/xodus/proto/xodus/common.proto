@@ -8,4 +8,6 @@ enum XodusMessageType {
     PONG = 2;
     MSA_TOKEN_REQUEST=3;
     MSA_TOKEN_RESPONSE=4;
+    OWNERSHIP_REQUEST=5;
+    OWNERSHIP_RESPONSE=6;
 }

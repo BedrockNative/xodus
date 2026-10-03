@@ -20,6 +20,8 @@ pub enum LicenseContentError {
     /// not covered by the account's current subscription tier).
     #[error("not entitled to this content: {description}")]
     NotEntitled { description: String },
+    #[error("invalid content license response")]
+    InvalidResponse,
 }
 
 // we might need a bump in xal-rs concerning reqwest,
@@ -71,9 +73,16 @@ pub async fn get_license_content(
             });
         }
     };
-    let license = &content.keys[0].value;
-    let license = BASE64_STANDARD.decode(license).unwrap();
-    let license = quick_xml::de::from_str::<License>(&String::from_utf8(license).unwrap()).unwrap();
+    let license = &content
+        .keys
+        .first()
+        .ok_or(LicenseContentError::InvalidResponse)?
+        .value;
+    let license = BASE64_STANDARD
+        .decode(license)
+        .map_err(|_| LicenseContentError::InvalidResponse)?;
+    let license = quick_xml::de::from_reader::<_, License>(license.as_slice())
+        .map_err(|_| LicenseContentError::InvalidResponse)?;
     Ok((content, license))
 }
 

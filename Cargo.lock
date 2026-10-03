@@ -7132,7 +7132,7 @@ dependencies = [
 
 [[package]]
 name = "xodus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes 0.9.3",
  "aes-keywrap",
@@ -7142,6 +7142,7 @@ dependencies = [
  "bergshamra-c14n",
  "cbc 0.2.1",
  "chrono",
+ "dbus-secret-service",
  "dbus-secret-service-keyring-store",
  "ed25519-dalek 3.0.0",
  "globset",
@@ -7172,7 +7173,7 @@ dependencies = [
 
 [[package]]
 name = "xodus-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -7187,6 +7188,7 @@ dependencies = [
  "inquire",
  "msixvc",
  "nix",
+ "quick-xml 0.42.0",
  "reqwest 0.13.4",
  "rustix",
  "serde_json",
@@ -7202,7 +7204,7 @@ dependencies = [
 
 [[package]]
 name = "xodus-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "console-subscriber",

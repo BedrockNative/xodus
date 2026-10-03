@@ -32,6 +32,9 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
         _ => unreachable!(),
     };
 
+    if issued_tokens.is_empty() {
+        return ExitCode::FAILURE;
+    }
     for token in issued_tokens {
         let address = token.applies_to.endpoint_reference.address.clone();
         let token = token.into();
@@ -41,6 +44,11 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
             address
         };
         tokens.save_user_token(address, token).unwrap();
+    }
+
+    if tokens.remember_current_account().is_err() {
+        eprintln!("Unable to persist the signed-in account");
+        return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS
