@@ -286,6 +286,14 @@ where
             return Poll::Ready(Ok(0));
         }
 
+        // Tokio File::poll_write can acknowledge a buffered write before its
+        // blocking task completes. A different file handle must not read yet.
+        match AsyncWrite::poll_flush(Pin::new(&mut self.cache_writer), cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
+
         loop {
             match self.cache_read_state {
                 CacheReadState::Idle => {
@@ -495,7 +503,7 @@ where
 
             match self.as_mut().poll_flush_pending_chunk(cx) {
                 Poll::Ready(Ok(())) => {
-                    if self.pending_chunk.is_some() {
+                    if self.pending_chunk.is_some() || self.cached_len >= target_end {
                         continue;
                     }
                 }
@@ -853,6 +861,56 @@ mod tests {
         assert_eq!(&buf[..], &body[..64]);
         assert!(file.cached_len() >= 64);
         let _ = std::fs::remove_file(cache);
+    }
+
+    #[test]
+    fn cached_reads_wait_for_the_writer_before_touching_the_reader() {
+        use std::pin::Pin;
+        use std::task::Poll;
+        use tokio::io::{AsyncRead, ReadBuf};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let body = test_body();
+            let cache = cache_path("pending-write");
+            let mut file = PrefixCacheFile::new(
+                std::io::Cursor::new(body.clone()),
+                body.len() as u64,
+                &cache,
+            )
+            .await
+            .unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = blocked.recv_timeout(std::time::Duration::from_secs(5));
+            });
+            ready.await.unwrap();
+            let mut bytes = [0; 64];
+            std::future::poll_fn(|cx| {
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(Pin::new(&mut file).poll_read(cx, &mut buf).is_pending());
+                // The writer cannot finish while the only blocking worker is held.
+                // Reading/seeking its separate reader at this point is the race.
+                assert!(matches!(file.cache_read_state, super::CacheReadState::Idle));
+                Poll::Ready(())
+            })
+            .await;
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            file.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, &body[..64]);
+            file.seek(SeekFrom::Start(16)).await.unwrap();
+            file.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, &body[16..80]);
+            drop(file);
+            std::fs::remove_file(cache).unwrap();
+        });
     }
 
     #[tokio::test]
