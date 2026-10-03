@@ -24,7 +24,9 @@ pub async fn route(
         }
         let read = socket.read_exact(&mut read_magic).await;
         if let Err(err) = read {
-            tracing::error!("Failed to read magic: {err:?}");
+            if err.kind() != std::io::ErrorKind::UnexpectedEof {
+                tracing::error!("Failed to read magic: {err:?}");
+            }
             return;
         }
 

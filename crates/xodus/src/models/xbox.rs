@@ -89,12 +89,15 @@ pub struct XstsRequest {
 #[serde(rename_all = "PascalCase")]
 pub struct TitleMgtResponse {
     pub end_points: Vec<TitleMgtEndPoint>,
+    #[serde(default)]
     pub signature_policies: Vec<TitleMgtSignaturePolicy>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct TitleMgtEndPoint {
+    #[serde(default)]
+    pub path: Option<String>,
     pub protocol: String,
     pub host: String,
     #[serde(default)]

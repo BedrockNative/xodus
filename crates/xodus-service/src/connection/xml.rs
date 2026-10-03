@@ -2,7 +2,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use xodus::models::live::ExchangeUserTokenOutcome;
 use xodus::models::secrets::Token;
 use xodus::models::soap;
-use xodus::models::xgameruntime::xuser::{MSATokenRequest, MSATokenResponse};
+use xodus::models::xgameruntime::xuser::{
+    MSATokenRequest, MSATokenResponse, XboxTokenRequest, XboxTokenResponse,
+};
 use xodus::proto::xodus::XodusMessageType;
 
 use crate::XML_MAGIC;
@@ -55,9 +57,7 @@ pub async fn parse_message(
             Ok(quick_xml::se::to_string(&response)?.into_bytes())
         }
         XodusMessageType::MsaTokenRequest => {
-            tracing::debug!("Raw buffer: {buffer:?}");
             let string_buf = std::str::from_utf8(&buffer)?;
-            tracing::debug!("String buffer: {string_buf:?}");
             let req = quick_xml::de::from_str::<MSATokenRequest>(string_buf)?;
             let Token::Legacy(token) = context.tokens().get_user_sts_token()? else {
                 return Ok(vec![]);
@@ -67,7 +67,11 @@ pub async fn parse_message(
             } else {
                 "xboxlive.signin"
             };
-            let device_token = context.device_token.as_ref().unwrap();
+            let device_token = context
+                .device_token
+                .as_ref()
+                .ok_or("Device credentials unavailable")?;
+            let user = context.tokens().get_user().ok();
             let device_token_resp = xodus::api::live::exchange_device_token(
                 &context.client,
                 device_token.clone(),
@@ -90,7 +94,9 @@ pub async fn parse_message(
             let user_token = xodus::api::live::exchange_user_token(
                 &context.client,
                 token,
-                "USERNAME".to_string(),
+                user.as_ref()
+                    .map(|u| u.username.clone())
+                    .unwrap_or_default(),
                 device_token.clone(),
                 None,
                 Some("Silent".to_string()),
@@ -109,6 +115,9 @@ pub async fn parse_message(
                 ExchangeUserTokenOutcome::Issued(
                     soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
                 ) => {
+                    if collection.security_tokens.len() < 2 {
+                        return Err("Incomplete MSA token response".into());
+                    }
                     if let Some(sts) = collection.security_tokens.pop() {
                         let address = sts.applies_to.endpoint_reference.address.clone();
                         let sts: Token = sts.into();
@@ -129,6 +138,8 @@ pub async fn parse_message(
                     };
                     let payload = MSATokenResponse {
                         token: user_token,
+                        puid: user.as_ref().map(|u| u.puid.clone()),
+                        user_name: user.as_ref().map(|u| u.username.clone()),
                         expiry: expiry.timestamp(),
                         device_expiry: ms_device_rps_token.as_ref().map(|(_, r)| *r).unwrap_or(0),
                         device_rps: ms_device_rps_token
@@ -138,8 +149,198 @@ pub async fn parse_message(
                     let payload = quick_xml::se::to_string(&payload)?;
                     Ok(payload.as_bytes().to_vec())
                 }
-                _ => todo!("Error handling sill sucks"),
+                _ => Err("MSA authentication did not issue tokens".into()),
             }
+        }
+        XodusMessageType::XboxTokenRequest => {
+            let req: XboxTokenRequest = quick_xml::de::from_reader(buffer.as_slice())?;
+            if req.client_id.is_empty() || req.title_id <= 0 {
+                return Err("Application identity is required".into());
+            }
+            let uri = reqwest::Url::parse(&req.relying_party)?;
+            if !matches!(uri.scheme(), "https" | "wss")
+                || uri.host_str().is_none()
+                || !uri.username().is_empty()
+                || uri.password().is_some()
+                || uri.fragment().is_some()
+            {
+                tracing::warn!(
+                    scheme = uri.scheme(),
+                    host = uri.host_str().unwrap_or(""),
+                    has_credentials = !uri.username().is_empty() || uri.password().is_some(),
+                    has_fragment = uri.fragment().is_some(),
+                    "Unsupported Xbox resource URL"
+                );
+                return Err("Unsupported Xbox relying party".into());
+            }
+            let user = context.tokens().get_user()?;
+            // Do not reuse a session after local sign-out removed the credentials.
+            context.tokens().get_user_sts_token()?;
+            let slot = xodus::auth::broker_session_slot(&user.puid, &req.client_id, req.title_id);
+            let mut cached = slot.lock().await;
+            if !cached.as_ref().is_some_and(|session| session.is_valid()) {
+                let (auth, sisu, device) = xodus::auth::do_sisu(
+                    &context.client,
+                    context.tokens(),
+                    &req.client_id,
+                    req.title_id,
+                )
+                .await
+                .map_err(|_| "Xbox session authentication failed")?;
+                let endpoints =
+                    xodus::api::xbox::title::get_title_management(&context.client).await?;
+                *cached = Some(xodus::auth::BrokerSession {
+                    auth,
+                    sisu,
+                    device,
+                    endpoints,
+                    title_endpoints_loaded: false,
+                    audiences: Default::default(),
+                    created: std::time::Instant::now(),
+                });
+            }
+            let session = cached.as_mut().ok_or("Xbox session unavailable")?;
+            let xodus::auth::BrokerSession {
+                auth,
+                sisu,
+                device,
+                endpoints,
+                title_endpoints_loaded,
+                audiences,
+                ..
+            } = session;
+            if !*title_endpoints_loaded
+                && xodus::api::xbox::title::get_endpoint(&req.relying_party, endpoints).is_none()
+            {
+                let title_url = format!(
+                    "https://title.mgt.xboxlive.com/titles/{}/endpoints",
+                    req.title_id
+                );
+                let title_claims = sisu
+                    .authorization_token
+                    .display_claims
+                    .as_ref()
+                    .and_then(|c| c.xui.first())
+                    .ok_or("No Xbox session claims")?;
+                let title_uhs = title_claims.get("uhs").ok_or("No Xbox session user hash")?;
+                let title_auth = format!("XBL3.0 x={title_uhs};{}", sisu.authorization_token.token);
+                let signature = xodus::auth::sign_broker_request(
+                    auth,
+                    &title_url,
+                    "GET",
+                    "x-xbl-contract-version: 1\r\n",
+                    &title_auth,
+                )
+                .await?;
+                let title_endpoints: xodus::models::xbox::TitleMgtResponse = context
+                    .client
+                    .get(title_url)
+                    .header("Authorization", title_auth)
+                    .header("Signature", signature)
+                    .header("x-xbl-contract-version", "1")
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                endpoints.end_points.extend(title_endpoints.end_points);
+                *title_endpoints_loaded = true;
+            }
+            if xodus::api::xbox::title::get_endpoint(&req.relying_party, endpoints).is_none() {
+                tracing::warn!(
+                    host = uri.host_str().unwrap_or(""),
+                    "Unrecognized Xbox resource host"
+                );
+            }
+            let endpoint = xodus::api::xbox::title::get_endpoint(&req.relying_party, endpoints)
+                .ok_or("Unknown Xbox resource endpoint")?;
+            let relying_party = endpoint
+                .relying_party
+                .as_deref()
+                .ok_or("Endpoint has no token audience")?;
+            let token = if relying_party == "http://xboxlive.com" {
+                sisu.authorization_token.clone()
+            } else {
+                let margin = chrono::Utc::now() + chrono::Duration::seconds(60);
+                if let Some(token) = audiences
+                    .get(relying_party)
+                    .filter(|token| token.not_after > margin)
+                {
+                    token.clone()
+                } else {
+                    let token = auth
+                        .get_xsts_token(
+                            Some(device),
+                            Some(&sisu.title_token),
+                            Some(&sisu.user_token),
+                            relying_party,
+                        )
+                        .await
+                        .map_err(|_| "Xbox relying-party authorization failed")?;
+                    audiences.insert(relying_party.to_owned(), token.clone());
+                    token
+                }
+            };
+            let claims = sisu
+                .authorization_token
+                .display_claims
+                .as_ref()
+                .and_then(|c| c.xui.first())
+                .ok_or("Xbox session has no user claims")?;
+            let uhs = token
+                .display_claims
+                .as_ref()
+                .and_then(|c| c.xui.first())
+                .and_then(|c| c.get("uhs"))
+                .ok_or("Xbox response has no user hash")?;
+            let xuid = claims.get("xid").ok_or("Xbox response has no user ID")?;
+            let authorization = format!("XBL3.0 x={uhs};{}", token.token);
+            let signature =
+                if req.http_method.is_empty() || endpoint.signature_policy_index.is_none() {
+                    String::new()
+                } else {
+                    xodus::auth::sign_broker_request(
+                        auth,
+                        &req.relying_party,
+                        &req.http_method,
+                        &req.request_headers,
+                        &authorization,
+                    )
+                    .await?
+                };
+            let payload = XboxTokenResponse {
+                token: authorization,
+                signature,
+                sandbox: auth.sandbox_id(),
+                expiry: token.not_after.timestamp(),
+                puid: user.puid,
+                user_name: user.username,
+                xuid: xuid.clone(),
+                gamertag: claims.get("gtg").cloned().unwrap_or_default(),
+                user_hash: uhs.clone(),
+                age_group: claims
+                    .get("agg")
+                    .cloned()
+                    .ok_or("Xbox response has no age group")?,
+                modern_gamertag: claims.get("mgt").cloned().unwrap_or_default(),
+                modern_gamertag_suffix: claims.get("mgs").cloned().unwrap_or_default(),
+                unique_modern_gamertag: claims.get("umg").cloned().unwrap_or_default(),
+                privileges: claims.get("prv").cloned().unwrap_or_default(),
+                enforcement: claims.get("enf").cloned().unwrap_or_default(),
+                restrictions: claims.get("usr").cloned().unwrap_or_default(),
+                title_restrictions: claims.get("utr").cloned().unwrap_or_default(),
+            };
+            Ok(quick_xml::se::to_string(&payload)?.into_bytes())
+        }
+        XodusMessageType::StoreRequest => {
+            let req: xodus::licensing::store::StoreRequest =
+                quick_xml::de::from_reader(buffer.as_slice())?;
+            let reply = xodus::licensing::store::handle(context.tokens(), req).await;
+            let payload = quick_xml::se::to_string(&reply)?;
+            if payload.len() > u16::MAX as usize {
+                return Err("Store response exceeds protocol limit".into());
+            }
+            Ok(payload.into_bytes())
         }
         _ => Err("Unimplemented".into()),
     }

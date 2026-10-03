@@ -34,6 +34,48 @@ pub async fn get_license_content(
     content_id: String,
     market: String,
 ) -> Result<(LicenseContent, License), LicenseContentError> {
+    request_license_content(
+        client,
+        device_ms_token,
+        user_ms_token,
+        ticket_reference,
+        content_id,
+        market,
+        true,
+    )
+    .await
+}
+
+/// Request a runtime lease rather than only a content-decryption key.
+pub async fn get_license_information(
+    client: &reqwest::Client,
+    device_ms_token: String,
+    user_ms_token: String,
+    ticket_reference: String,
+    content_id: String,
+    market: String,
+) -> Result<(LicenseContent, License), LicenseContentError> {
+    request_license_content(
+        client,
+        device_ms_token,
+        user_ms_token,
+        ticket_reference,
+        content_id,
+        market,
+        false,
+    )
+    .await
+}
+
+async fn request_license_content(
+    client: &reqwest::Client,
+    device_ms_token: String,
+    user_ms_token: String,
+    ticket_reference: String,
+    content_id: String,
+    market: String,
+    key_only: bool,
+) -> Result<(LicenseContent, License), LicenseContentError> {
     let cv = CorrelationVector::new();
     let response = client
         .post("https://licensing.mp.microsoft.com/v7.0/licenses/content")
@@ -47,8 +89,8 @@ pub async fn get_license_content(
             client_challenge: "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiID8+PENsaWVudENoYWxsZW5nZSB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIiB4bWxuczp4c2Q9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxucz0iaHR0cDovL3NjaGVtYXMubWljcm9zb2Z0LmNvbS9vbmVzdG9yZS9zZWN1cml0eS9ta21zL0xpY1JlcS92MSIgVmVyc2lvbj0iMiI+PExpY2Vuc2VQcm90b2NvbFZlcnNpb24+NTwvTGljZW5zZVByb3RvY29sVmVyc2lvbj48U2lnbmluZ0tleVZlcnNpb24+MTwvU2lnbmluZ0tleVZlcnNpb24+PENsaWVudFZlcnNpb24+MjwvQ2xpZW50VmVyc2lvbj48L0NsaWVudENoYWxsZW5nZT4=".into(),
             concurrency_mode: "Rude".into(),
             license_version: 4,
-            need_key: true,
-            key_only: true,
+            need_key: key_only,
+            key_only,
             device_context: DeviceContext::default(),
             users: HashMap::from_iter(
                 [(utils::generate_suid(),
@@ -62,7 +104,10 @@ pub async fn get_license_content(
         .send()
         .await?;
 
-    let content_res = response.json::<LicenseContentResponse>().await?;
+    let content_res = response
+        .error_for_status()?
+        .json::<LicenseContentResponse>()
+        .await?;
     let content = match content_res {
         LicenseContentResponse::Success { license } => license,
         LicenseContentResponse::SatisfactionFailure {
@@ -73,11 +118,12 @@ pub async fn get_license_content(
             });
         }
     };
-    let license = &content
-        .keys
-        .first()
-        .ok_or(LicenseContentError::InvalidResponse)?
-        .value;
+    let license = if key_only {
+        content.keys.first()
+    } else {
+        content.leases.first().or_else(|| content.keys.first())
+    };
+    let license = &license.ok_or(LicenseContentError::InvalidResponse)?.value;
     let license = BASE64_STANDARD
         .decode(license)
         .map_err(|_| LicenseContentError::InvalidResponse)?;

@@ -4,28 +4,44 @@ pub async fn get_title_management(client: &reqwest::Client) -> reqwest::Result<T
     let response = client
         .get("https://title.mgt.xboxlive.com/titles/default/endpoints?type=1")
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
     response.json().await
 }
 
 pub fn get_endpoint<'a>(url: &str, response: &'a TitleMgtResponse) -> Option<&'a TitleMgtEndPoint> {
-    let parsed_url = reqwest::Url::parse(url).ok()?;
+    let mut parsed_url = reqwest::Url::parse(url).ok()?;
+    // A secure WebSocket authenticates its HTTPS upgrade request against NSAL.
+    if parsed_url.scheme() == "wss" {
+        parsed_url.set_scheme("https").ok()?;
+    }
     let filtered: Vec<&TitleMgtEndPoint> = response
         .end_points
         .iter()
-        .filter(|e| e.protocol == parsed_url.scheme())
+        .filter(|e| {
+            e.protocol == parsed_url.scheme()
+                && e.path
+                    .as_ref()
+                    .map(|p| parsed_url.path() == p)
+                    .unwrap_or(true)
+        })
         .collect();
     let hosts: Vec<globset::Glob> = filtered
         .iter()
         .map(|e| globset::Glob::new(&e.host).expect("Unsupported glob"))
         .collect();
     let set = globset::GlobSet::new(hosts).ok()?;
-    let matched = set.matches(parsed_url.host_str().unwrap());
+    let matched = set.matches(parsed_url.host_str()?);
     let matched: Vec<&TitleMgtEndPoint> = matched.into_iter().map(|m| filtered[m]).collect();
 
     matched
         .iter()
-        .max_by_key(|&&pat| pat.host.chars().filter(|&c| c != '*').count())
+        .max_by_key(|&&pat| {
+            (
+                pat.host.chars().filter(|&c| c != '*').count(),
+                pat.path.as_ref().map_or(0, |p| p.len()),
+            )
+        })
         .copied()
 }
 
@@ -56,5 +72,64 @@ mod test {
             updates.relying_party.as_deref(),
             Some("http://update.xboxlive.com")
         );
+    }
+}
+
+#[cfg(test)]
+mod broker_endpoint_tests {
+    use super::*;
+    #[test]
+    fn title_metadata_without_signing_policies() {
+        let metadata: TitleMgtResponse = serde_json::from_str(r#"{"EndPoints":[
+            {"Protocol":"https","Host":"*.example.test","HostType":"wildcard","RelyingParty":"https://title.example/","TokenType":"JWT"}
+        ]}"#).unwrap();
+        assert!(metadata.signature_policies.is_empty());
+        assert_eq!(
+            get_endpoint("https://one.example.test/path?q=1", &metadata)
+                .unwrap()
+                .relying_party
+                .as_deref(),
+            Some("https://title.example/")
+        );
+        assert!(get_endpoint("https://example.test.attacker.invalid/path", &metadata).is_none());
+        assert!(get_endpoint("http://one.example.test/path", &metadata).is_none());
+    }
+    #[test]
+    fn secure_websocket_uses_https_endpoint() {
+        let metadata: TitleMgtResponse = serde_json::from_str(r#"{"EndPoints":[
+            {"Protocol":"https","Host":"*.xboxlive.com","RelyingParty":"http://xboxlive.com","SignaturePolicyIndex":0}
+        ]}"#).unwrap();
+        let endpoint = get_endpoint("wss://rta.xboxlive.com/connect", &metadata).unwrap();
+        assert_eq!(
+            endpoint.relying_party.as_deref(),
+            Some("http://xboxlive.com")
+        );
+        assert_eq!(endpoint.signature_policy_index, Some(0));
+        assert!(get_endpoint("ws://rta.xboxlive.com/connect", &metadata).is_none());
+        assert!(
+            get_endpoint("wss://rta.xboxlive.com.attacker.invalid/connect", &metadata).is_none()
+        );
+    }
+    #[test]
+    fn path_specific_endpoint_wins() {
+        let metadata: TitleMgtResponse = serde_json::from_str(r#"{"EndPoints":[
+            {"Protocol":"https","Host":"api.example.test","RelyingParty":"https://general/"},
+            {"Protocol":"https","Host":"api.example.test","Path":"/special","RelyingParty":"https://special/"}
+        ]}"#).unwrap();
+        assert_eq!(
+            get_endpoint("https://api.example.test/special", &metadata)
+                .unwrap()
+                .relying_party
+                .as_deref(),
+            Some("https://special/")
+        );
+        assert_eq!(
+            get_endpoint("https://api.example.test/other", &metadata)
+                .unwrap()
+                .relying_party
+                .as_deref(),
+            Some("https://general/")
+        );
+        assert!(get_endpoint("not a URL", &metadata).is_none());
     }
 }

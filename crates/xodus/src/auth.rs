@@ -181,8 +181,7 @@ pub async fn do_sisu(
         .await?;
     let resp = auth
         .sisu_authorize_rps(&user_token, &data.token, None)
-        .await
-        .expect("ok");
+        .await?;
     Ok((auth, resp, data))
 }
 
@@ -200,4 +199,105 @@ async fn test_minecraft_win_auth() {
     println!("title {}", resp.title_token.token);
     println!("user {}", resp.user_token.token);
     println!("webpage {}", resp.web_page);
+}
+
+/// Sign only; the caller remains responsible for issuing its HTTP request.
+pub async fn sign_broker_request(
+    auth: &XalAuthenticator,
+    url: &str,
+    method: &str,
+    headers: &str,
+    authorization: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use xal::RequestSigning;
+    let mut builder = reqwest_011::Client::new().request(method.parse()?, url);
+    for line in headers.lines().filter(|line| !line.trim().is_empty()) {
+        let (name, value) = line.split_once(':').ok_or("Invalid HTTP header")?;
+        if !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Signature") {
+            builder = builder.header(name.trim(), value.trim());
+        }
+    }
+    let request = builder
+        .header("Authorization", authorization)
+        .body(Vec::<u8>::new())
+        .build()?;
+    let signed = auth
+        .request_signer()
+        .sign_request(request, None)
+        .await
+        .map_err(|_| "Xbox request signing failed")?;
+    Ok(signed
+        .headers()
+        .get("Signature")
+        .ok_or("No signature produced")?
+        .to_str()?
+        .to_owned())
+}
+
+/// A broker session retains the proof key together with the tokens it signed.
+/// Entries are process-local and partitioned by account and application identity.
+pub struct BrokerSession {
+    pub auth: XalAuthenticator,
+    pub sisu: xal::response::SisuRPSAuthorizationResponse,
+    pub device: xal::response::DeviceToken,
+    pub endpoints: crate::models::xbox::TitleMgtResponse,
+    pub title_endpoints_loaded: bool,
+    pub audiences: std::collections::HashMap<String, xal::response::XSTSToken>,
+    pub created: std::time::Instant,
+}
+impl BrokerSession {
+    pub fn is_valid(&self) -> bool {
+        let margin = chrono::Utc::now() + chrono::Duration::seconds(60);
+        self.created.elapsed() < std::time::Duration::from_secs(300)
+            && self.sisu.authorization_token.not_after > margin
+            && self.sisu.user_token.not_after > margin
+            && self.sisu.title_token.not_after > margin
+            && self.device.not_after > margin
+    }
+}
+pub type BrokerSessionSlot = std::sync::Arc<tokio::sync::Mutex<Option<BrokerSession>>>;
+pub fn broker_session_slot(account: &str, client: &str, title: i64) -> BrokerSessionSlot {
+    type Key = (String, String, i64);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Key, BrokerSessionSlot>>,
+    > = std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let key = (account.to_owned(), client.to_owned(), title);
+    if let Some(slot) = cache.get(&key) {
+        return slot.clone();
+    }
+    // Bound dormant account/application entries; in-flight references remain valid.
+    if cache.len() >= 16 {
+        cache.clear();
+    }
+    let slot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    cache.insert(key, slot.clone());
+    slot
+}
+#[cfg(test)]
+mod broker_cache_tests {
+    #[test]
+    fn separates_accounts_and_applications() {
+        use std::sync::Arc;
+        let first = super::broker_session_slot("test-account-a", "client-a", 1);
+        assert!(Arc::ptr_eq(
+            &first,
+            &super::broker_session_slot("test-account-a", "client-a", 1)
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &super::broker_session_slot("test-account-b", "client-a", 1)
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &super::broker_session_slot("test-account-a", "client-b", 1)
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &super::broker_session_slot("test-account-a", "client-a", 2)
+        ));
+    }
 }
