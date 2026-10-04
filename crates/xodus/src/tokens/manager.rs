@@ -194,6 +194,7 @@ mod ownership_tests {
         sign_in(&profile, "first");
         sign_in(&profile, "second");
         memory.set("cached-xsts", b"private").unwrap();
+        profile.cache_gdk_sessions(b"paired-key-and-token").unwrap();
         let first = profile
             .accounts()
             .unwrap()
@@ -202,6 +203,10 @@ mod ownership_tests {
             .unwrap();
         profile.select_account(&first.id).unwrap();
         assert!(memory.get("cached-xsts").unwrap().is_none());
+        assert!(profile.get_cached_gdk_sessions().is_none());
+        profile.cache_gdk_sessions(b"new-session").unwrap();
+        profile.remove_persistent().unwrap();
+        assert!(profile.get_cached_gdk_sessions().is_none());
     }
 }
 
@@ -476,6 +481,23 @@ impl TokenManager {
             Err(error) => return Err(error),
         }
         Ok(accounts)
+    }
+
+    /// Wine's proof-key/token pairs are volatile and share the logout/account
+    /// invalidation rules of the other ephemeral authentication state.
+    pub fn get_cached_gdk_sessions(&self) -> Option<Vec<u8>> {
+        self.ephemeral.get("winegdk-bootstrap-v1").ok().flatten()
+    }
+
+    pub fn cache_gdk_sessions(&self, data: &[u8]) -> Result<(), TokenStoreError> {
+        if data.len() > 1_000_000 {
+            return Ok(());
+        }
+        self.ephemeral.set_with_expiry(
+            "winegdk-bootstrap-v1",
+            data,
+            Instant::now() + std::time::Duration::from_secs(3600),
+        )
     }
 
     // ---- Ephemeral XSTS-by-relying-party cache --------------------------------

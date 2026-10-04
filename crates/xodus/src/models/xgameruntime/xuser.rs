@@ -13,6 +13,7 @@ pub struct MSATokenRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MSATokenResponse {
+    pub gdk_session_cache_version: u32,
     pub token: String,
     pub expiry: i64,
     pub device_rps: String,

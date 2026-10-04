@@ -42,6 +42,7 @@ pub async fn parse_message(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     match message_type {
         XodusMessageType::Ping => Ok(buffer),
+        XodusMessageType::GdkSessionRequest => super::gdk_session::handle(context, &buffer),
         XodusMessageType::OwnershipRequest => {
             use xodus::licensing::ownership::{
                 self, OwnershipRequest, OwnershipResponse, OwnershipStatus,
@@ -137,6 +138,7 @@ pub async fn parse_message(
                         return Ok(vec![]);
                     };
                     let payload = MSATokenResponse {
+                        gdk_session_cache_version: 1,
                         token: user_token,
                         puid: user.as_ref().map(|u| u.puid.clone()),
                         user_name: user.as_ref().map(|u| u.username.clone()),

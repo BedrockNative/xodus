@@ -194,7 +194,7 @@ async fn test_minecraft_win_auth() {
 
     let (_, resp, _) = do_sisu(&client, &tokens, "0000000040159362", 896928775)
         .await
-        .expect("ok");
+        .expect("authentication failed");
 
     println!("title {}", resp.title_token.token);
     println!("user {}", resp.user_token.token);
@@ -248,8 +248,11 @@ pub struct BrokerSession {
 impl BrokerSession {
     pub fn is_valid(&self) -> bool {
         let margin = chrono::Utc::now() + chrono::Duration::seconds(60);
-        self.created.elapsed() < std::time::Duration::from_secs(300)
-            && self.sisu.authorization_token.not_after > margin
+        // Keep the proof key and valid tokens together until their actual expiry.
+        // The IPC handler verifies the current account and local credentials on
+        // every request. A fixed five-minute TTL forces expensive SISU exchanges
+        // during gameplay while all requests wait for the same session lock.
+        self.sisu.authorization_token.not_after > margin
             && self.sisu.user_token.not_after > margin
             && self.sisu.title_token.not_after > margin
             && self.device.not_after > margin
@@ -279,6 +282,63 @@ pub fn broker_session_slot(account: &str, client: &str, title: i64) -> BrokerSes
 }
 #[cfg(test)]
 mod broker_cache_tests {
+    fn fixture_token<T>() -> xal::response::XTokenResponse<T> {
+        let now = chrono::Utc::now();
+        xal::response::XTokenResponse {
+            issue_instant: now - chrono::Duration::hours(1),
+            not_after: now + chrono::Duration::hours(1),
+            token: "fixture".into(),
+            display_claims: None,
+        }
+    }
+
+    fn fixture_session() -> super::BrokerSession {
+        super::BrokerSession {
+            auth: xal::XalAuthenticator::new(
+                super::get_app_params(),
+                xal::client_params::CLIENT_WINDOWS(),
+                "RETAIL".into(),
+            ),
+            sisu: xal::response::SisuRPSAuthorizationResponse {
+                title_token: fixture_token(),
+                user_token: fixture_token(),
+                authorization_token: fixture_token(),
+                web_page: String::new(),
+                use_modern_gamertag: None,
+            },
+            device: fixture_token(),
+            endpoints: crate::models::xbox::TitleMgtResponse {
+                end_points: vec![],
+                signature_policies: vec![],
+            },
+            title_endpoints_loaded: false,
+            audiences: Default::default(),
+            created: std::time::Instant::now() - std::time::Duration::from_secs(1800),
+        }
+    }
+
+    #[test]
+    fn valid_session_survives_the_old_five_minute_limit() {
+        assert!(fixture_session().is_valid());
+    }
+
+    #[test]
+    fn each_expiring_credential_requires_a_new_session() {
+        for index in 0..4 {
+            let mut session = fixture_session();
+            let expires = chrono::Utc::now() + chrono::Duration::seconds(30);
+            match index {
+                0 => session.sisu.authorization_token.not_after = expires,
+                1 => session.sisu.user_token.not_after = expires,
+                2 => session.sisu.title_token.not_after = expires,
+                _ => session.device.not_after = expires,
+            }
+            assert!(
+                !session.is_valid(),
+                "expiring credential {index} was reused"
+            );
+        }
+    }
     #[test]
     fn separates_accounts_and_applications() {
         use std::sync::Arc;

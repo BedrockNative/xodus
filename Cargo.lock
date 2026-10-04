@@ -7132,7 +7132,7 @@ dependencies = [
 
 [[package]]
 name = "xodus"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes 0.9.3",
  "aes-keywrap",
@@ -7174,7 +7174,7 @@ dependencies = [
 
 [[package]]
 name = "xodus-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -7205,12 +7205,13 @@ dependencies = [
 
 [[package]]
 name = "xodus-service"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "console-subscriber",
  "quick-xml 0.42.0",
  "reqwest 0.13.4",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",
