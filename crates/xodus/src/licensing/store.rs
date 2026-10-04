@@ -1,6 +1,7 @@
 //! Legacy UWP Store receipts and licensing, obtained from Microsoft for the
 //! signed-in account. Receipt XML is returned unchanged; it is never generated.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ const NOT_FOUND: u32 = 0x80070490;
 const NOT_SUPPORTED: u32 = 0x80004001;
 const MAX_REPLY: usize = 1 << 20;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename = "StoreRequest", rename_all = "PascalCase")]
 pub struct StoreRequest {
     pub package_family_name: String,
@@ -81,7 +82,94 @@ impl StoreError {
 }
 
 type CacheKey = (String, String, String, String, String);
-type Slot = Arc<tokio::sync::Mutex<Option<(Instant, StoreResponse)>>>;
+const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_REFRESH_AFTER: Duration = Duration::from_secs(40);
+
+#[derive(Default)]
+struct StoreCache {
+    value: Mutex<Option<(Instant, StoreResponse)>>,
+    fetch: tokio::sync::Mutex<()>,
+    refresh_scheduled: AtomicBool,
+}
+type Slot = Arc<StoreCache>;
+
+impl StoreCache {
+    fn read(&self) -> Option<(Instant, StoreResponse)> {
+        self.value
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|(created, reply)| {
+                cache_usable(
+                    *created,
+                    reply,
+                    Instant::now(),
+                    chrono::Utc::now().timestamp(),
+                )
+            })
+            .cloned()
+    }
+
+    fn replace(&self, reply: Option<StoreResponse>) {
+        *self.value.lock().unwrap_or_else(|p| p.into_inner()) = reply.map(|r| (Instant::now(), r));
+    }
+}
+
+fn cache_usable(created: Instant, reply: &StoreResponse, now: Instant, unix_now: i64) -> bool {
+    now.duration_since(created) < CACHE_TTL
+        && (!reply.is_active || reply.expiration_date > (unix_now + 11_644_473_600) * 10_000_000)
+}
+
+// Renew once ahead of expiry. Further renewals require another client request,
+// so unused entries do not keep making Store requests indefinitely. Cached
+// reads never take the network lock, and keep their original expiry on failure.
+fn schedule_refresh(
+    slot: &Slot,
+    tokens: &TokenManager,
+    request: &StoreRequest,
+    puid: &str,
+    created: Instant,
+) {
+    if request.operation != "License" || slot.refresh_scheduled.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let slot = slot.clone();
+    let tokens = tokens.clone();
+    let request = request.clone();
+    let puid = puid.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(CACHE_REFRESH_AFTER.saturating_sub(created.elapsed())).await;
+        let _fetch = slot.fetch.lock().await;
+        if tokens.get_user().is_ok_and(|u| u.puid == puid) && tokens.get_user_sts_token().is_ok() {
+            let started = Instant::now();
+            match fetch_store(&tokens, &request).await {
+                Ok(reply)
+                    if tokens.get_user().is_ok_and(|u| u.puid == puid)
+                        && tokens.get_user_sts_token().is_ok() =>
+                {
+                    slot.replace(Some(reply));
+                    tracing::debug!(
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "Store cache refreshed in background"
+                    );
+                }
+                Ok(_) | Err(StoreError::Credentials | StoreError::Authentication) => {
+                    slot.replace(None)
+                }
+                Err(error) => {
+                    // A transport failure does not extend a cached entitlement.
+                    tracing::warn!("Store background refresh failed: {error}");
+                }
+            }
+        } else {
+            slot.replace(None);
+        }
+        drop(_fetch);
+        // Bound retries if a caller keeps polling during a service failure.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        slot.refresh_scheduled.store(false, Ordering::Release);
+    });
+}
 fn cache_slot(key: CacheKey) -> Slot {
     static CACHE: OnceLock<Mutex<HashMap<CacheKey, Slot>>> = OnceLock::new();
     let mut cache = CACHE
@@ -298,14 +386,40 @@ async fn request_store(
         request.language.clone(),
         request.operation.clone(),
     ));
-    let mut cached = slot.lock().await;
-    if let Some((created, reply)) = cached
-        .as_ref()
-        .filter(|(time, _)| time.elapsed() < Duration::from_secs(60))
-    {
-        let _ = created;
-        return Ok(reply.clone());
+    if let Some((created, reply)) = slot.read() {
+        schedule_refresh(&slot, tokens, request, &user.puid, created);
+        return Ok(reply);
     }
+    let _fetch = slot.fetch.lock().await;
+    if !tokens
+        .get_user()
+        .is_ok_and(|current| current.puid == user.puid)
+        || tokens.get_user_sts_token().is_err()
+    {
+        return Err(StoreError::Credentials);
+    }
+    if let Some((created, reply)) = slot.read() {
+        schedule_refresh(&slot, tokens, request, &user.puid, created);
+        return Ok(reply);
+    }
+    let reply = fetch_store(tokens, request).await?;
+    if !tokens
+        .get_user()
+        .is_ok_and(|current| current.puid == user.puid)
+        || tokens.get_user_sts_token().is_err()
+    {
+        return Err(StoreError::Credentials);
+    }
+    slot.replace(Some(reply.clone()));
+    schedule_refresh(&slot, tokens, request, &user.puid, Instant::now());
+    Ok(reply)
+}
+
+async fn fetch_store(
+    tokens: &TokenManager,
+    request: &StoreRequest,
+) -> Result<StoreResponse, StoreError> {
+    let user = tokens.get_user().map_err(|_| StoreError::Credentials)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(25))
         .redirect(reqwest::redirect::Policy::none())
@@ -524,7 +638,6 @@ async fn request_store(
             }
         }
     }
-    *cached = Some((Instant::now(), reply.clone()));
     Ok(reply)
 }
 
@@ -701,6 +814,81 @@ mod tests {
         r.operation = "Purchase".into();
         assert!(matches!(validate_request(&r), Err(StoreError::Unsupported)));
     }
+    #[test]
+    fn store_cache_obeys_ttl_and_absolute_license_expiry() {
+        let created = Instant::now();
+        let unix_now = 1_800_000_000;
+        let mut reply = StoreResponse {
+            is_active: true,
+            expiration_date: (unix_now + 11_644_473_600 + 20) * 10_000_000,
+            ..Default::default()
+        };
+        assert!(cache_usable(
+            created,
+            &reply,
+            created + Duration::from_secs(19),
+            unix_now + 19
+        ));
+        assert!(!cache_usable(
+            created,
+            &reply,
+            created + Duration::from_secs(20),
+            unix_now + 20
+        ));
+        reply.expiration_date += 3600 * 10_000_000;
+        assert!(cache_usable(
+            created,
+            &reply,
+            created + Duration::from_secs(59),
+            unix_now + 59
+        ));
+        assert!(!cache_usable(
+            created,
+            &reply,
+            created + CACHE_TTL,
+            unix_now + 60
+        ));
+        reply.is_active = false;
+        reply.expiration_date = 0;
+        assert!(cache_usable(created, &reply, created, unix_now));
+    }
+
+    #[tokio::test]
+    async fn store_cached_reads_do_not_wait_for_network_refresh() {
+        let slot = StoreCache::default();
+        slot.replace(Some(StoreResponse::default()));
+        let _network_request = slot.fetch.lock().await;
+        assert!(slot.read().is_some());
+        slot.replace(None);
+        assert!(slot.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn store_refresh_is_single_flight_and_logout_invalidates_cache() {
+        let tokens = TokenManager::with_memory();
+        let slot = Arc::new(StoreCache::default());
+        slot.replace(Some(StoreResponse::default()));
+        let request = StoreRequest {
+            package_family_name: "Example.App_abc".into(),
+            market: "US".into(),
+            language: "en-US".into(),
+            operation: "License".into(),
+            product_id: String::new(),
+        };
+        let created = Instant::now() - CACHE_REFRESH_AFTER;
+        schedule_refresh(&slot, &tokens, &request, "signed-out-user", created);
+        assert!(slot.refresh_scheduled.load(Ordering::Acquire));
+        schedule_refresh(&slot, &tokens, &request, "signed-out-user", created);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slot.read().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(slot.refresh_scheduled.load(Ordering::Acquire));
+    }
+
     #[test]
     fn store_cache_separates_accounts_and_packages() {
         let key = (
