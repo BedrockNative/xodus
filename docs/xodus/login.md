@@ -35,3 +35,9 @@ You can see a sample RST2.srf request when we used it in [device](./device.md) S
 
 Device token always revolves arround user token - its binary secret is used for signing XML payloads as well as decrypting responses.
 
+
+## Login appearance
+
+The CLI injects `login.css` into every page and frame in its login WebView, including verification and recovery pages. It follows the system light/dark preference, preserves forced-color accessibility modes and uses Microsoft's white logo in dark mode. `login-theme.js` installs the stylesheet at document start; the native background matches the initial theme during navigation. Microsoft still handles form submission and authentication.
+
+The window embeds `assets/Xbox/appicon.png`. On Linux, before opening the WebView, the CLI also installs its embedded icon and hidden desktop entry under `$XDG_DATA_HOME` (default `~/.local/share`). The Wayland application identifier matches that desktop entry, so the compositor can resolve the Xbox icon. This does not require installing an external asset directory or adding a launcher to the applications menu.

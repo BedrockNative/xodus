@@ -1,0 +1,245 @@
+/* Presentation only. Microsoft owns the form, validation and navigation. */
+@media not all and (forced-colors: active) {
+  html.xodus-inline-login {
+    color-scheme: light dark;
+    --xodus-bg: #eef1f8;
+    --xodus-card: #ffffff;
+    --xodus-input: #f7f8fc;
+    --xodus-fg: #202432;
+    --xodus-muted: #586174;
+    --xodus-line: #ccd2df;
+    --xodus-accent: #285fc7;
+    --xodus-link: #245abb;
+    --xodus-error: #b42332;
+    --xodus-shadow: 0 12px 36px rgb(24 34 59 / 9%);
+    background: var(--xodus-bg) !important;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    html.xodus-inline-login {
+      --xodus-bg: #151820;
+      --xodus-card: #222630;
+      --xodus-input: #191d26;
+      --xodus-fg: #f0f2f8;
+      --xodus-muted: #b4bdcf;
+      --xodus-line: #495369;
+      --xodus-accent: #346edb;
+      --xodus-link: #9bbdff;
+      --xodus-error: #ff9fa8;
+      --xodus-shadow: 0 12px 36px rgb(0 0 0 / 20%);
+    }
+    /* Microsoft's official reversed logo, with a transparent background. */
+    .xodus-inline-login img[src*="/microsoft_logo_"] {
+      content: url("https://logincdn.msauth.net/shared/1.0/content/images/microsoft_logo_white_f024dc0422bf3c64a9cb9605a867b798.svg");
+    }
+    .xodus-inline-login img[src*="/signin-options_"],
+    .xodus-inline-login .identityBanner .backButton img {
+      filter: brightness(0) invert(.85);
+    }
+  }
+
+  /* Hosted confirmation pages use different, sometimes unnamed wrappers.
+     Clear every default background color, including inline styles and pseudo
+     elements. More specific theme rules below restore intentional surfaces.
+     Keep background images: some hosted controls use them as icons. */
+  .xodus-inline-login *,
+  .xodus-inline-login *::before,
+  .xodus-inline-login *::after {
+    background-color: transparent !important;
+  }
+
+  .xodus-inline-login body {
+    background: radial-gradient(ellipse at 10% 0%, rgb(89 120 196 / 12%), transparent 65%), var(--xodus-bg) !important;
+    color: var(--xodus-fg) !important;
+    font-family: "Segoe UI", system-ui, sans-serif;
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) {
+    background: var(--xodus-card) !important;
+    color: var(--xodus-fg) !important;
+    border: 1px solid var(--xodus-line);
+    border-radius: 16px;
+    box-shadow: var(--xodus-shadow);
+    padding: 28px !important;
+    margin: 24px auto !important;
+    width: calc(100% - 40px) !important;
+    max-width: 440px;
+    box-sizing: border-box;
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) .title {
+    color: var(--xodus-fg) !important;
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-top: 22px;
+  }
+
+  /* The first Continue request fades this interaction-blocking overlay in.
+     Its default white background otherwise washes out the dark card. */
+  .xodus-inline-login .lightbox-cover {
+    background-color: var(--xodus-card) !important;
+    border-radius: inherit;
+  }
+
+  .xodus-inline-login .subtitle,
+  .xodus-inline-login .text-secondary {
+    color: var(--xodus-muted) !important;
+  }
+
+  .xodus-inline-login .identityBanner,
+  .xodus-inline-login .identityBanner .identity,
+  .xodus-inline-login .identityBanner .backButton {
+    background: transparent !important;
+    color: var(--xodus-fg) !important;
+  }
+
+  .xodus-inline-login .identityBanner .backButton {
+    border: 0;
+    border-radius: 4px;
+  }
+
+  .xodus-inline-login .identityBanner .backButton:hover {
+    background: rgb(128 148 185 / 16%) !important;
+  }
+
+  .xodus-inline-login a { color: var(--xodus-link) !important; }
+  .xodus-inline-login a:hover { text-decoration: underline; }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) .form-control {
+    background: var(--xodus-input) !important;
+    color: var(--xodus-fg) !important;
+    border: 1px solid var(--xodus-line) !important;
+    border-radius: 8px;
+    min-height: 46px;
+    padding: 10px 12px;
+    box-shadow: none;
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) .form-control::placeholder {
+    color: var(--xodus-muted) !important;
+    opacity: 1;
+  }
+
+  .xodus-inline-login :is(a, button, input, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--xodus-link) !important;
+    outline-offset: 3px;
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) :is(.button, .win-button) {
+    border-radius: 8px;
+    min-height: 42px;
+    padding: 9px 22px;
+    font-weight: 600;
+    border: 1px solid var(--xodus-line);
+    background: var(--xodus-input);
+    color: var(--xodus-fg);
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) :is(.button_primary, .primary) {
+    background: var(--xodus-accent) !important;
+    border-color: var(--xodus-accent) !important;
+    color: #fff !important;
+  }
+
+  .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) :is(.button, .win-button):disabled {
+    opacity: .5;
+    cursor: default;
+  }
+
+  .xodus-inline-login .promoted-fed-cred-box {
+    background: var(--xodus-card) !important;
+    color: var(--xodus-fg) !important;
+    border: 1px solid var(--xodus-line) !important;
+    border-radius: 12px;
+    box-shadow: var(--xodus-shadow);
+    margin: 0 auto 24px !important;
+    width: calc(100% - 40px) !important;
+    max-width: 440px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .xodus-inline-login .tile:hover {
+    background-color: rgb(128 148 185 / 12%) !important;
+  }
+
+  .xodus-inline-login :is(.error, .alert-error, .alert-danger) {
+    color: var(--xodus-error) !important;
+  }
+
+  .xodus-inline-login #footer,
+  .xodus-inline-login #footer .footer-content {
+    background: var(--xodus-bg) !important;
+    color: var(--xodus-muted) !important;
+  }
+
+  @media (max-width: 380px) {
+    .xodus-inline-login :is(#lightbox, .lightbox, .sign-in-box) {
+      padding: 20px !important;
+      width: calc(100% - 24px) !important;
+      margin-top: 12px !important;
+    }
+    .xodus-inline-login .promoted-fed-cred-box {
+      width: calc(100% - 24px) !important;
+    }
+  }
+}
+
+/* Verification/recovery pages use the account portal's older component names. */
+@media not all and (forced-colors: active) {
+  .xodus-inline-login :is(#root, #page, #pagecontent, .outer, .middle,
+      .main, .content, .main-content, .content-container, .mainContent) {
+    background-color: transparent !important;
+    color: var(--xodus-fg) !important;
+  }
+  .xodus-inline-login :is(.lightbox, .sign-in-box, [role="dialog"]) {
+    background-color: var(--xodus-card) !important;
+    color: var(--xodus-fg) !important;
+  }
+  /* account.live.com uses a separate shell for proofs and recovery. */
+  .xodus-inline-login :is(#iPageElt, #c_base, #c_content, #maincontent,
+      #pageControlHost, #iHostInline, .App, .c_main, .c_inmiddle_area,
+      .pageSectionContainer, .modal-content, .modalDialogContainer) {
+    background-color: var(--xodus-card) !important;
+    color: var(--xodus-fg) !important;
+  }
+  .xodus-inline-login :is(.text-title, .text-subheader, .text-subheading,
+      .text-body, .text-block-body, .section-title, [role="heading"]) {
+    color: var(--xodus-fg) !important;
+  }
+  .xodus-inline-login :is(.help-block, .text-caption) {
+    color: var(--xodus-muted) !important;
+  }
+  .xodus-inline-login :is(h1, h2, h3, label, legend) {
+    color: var(--xodus-fg) !important;
+  }
+  .xodus-inline-login :is(input:not([type]), input[type="text"],
+      input[type="email"], input[type="password"], input[type="tel"],
+      input[type="number"], textarea, select) {
+    background-color: var(--xodus-input) !important;
+    color: var(--xodus-fg) !important;
+    border-color: var(--xodus-line) !important;
+    border-radius: 8px;
+  }
+  .xodus-inline-login :is(button, input[type="button"], input[type="submit"]):not(.backButton) {
+    background-color: var(--xodus-input) !important;
+    color: var(--xodus-fg) !important;
+    border: 1px solid var(--xodus-line);
+    border-radius: 8px;
+  }
+  .xodus-inline-login :is(.primary, .btn-primary, .button_primary, .default,
+      input[type="submit"], button[type="submit"]) {
+    background-color: var(--xodus-accent) !important;
+    color: #fff !important;
+    border-color: var(--xodus-accent) !important;
+  }
+  .xodus-inline-login :is(button, input):disabled { opacity: .5; }
+  .xodus-inline-login input:is([type="radio"], [type="checkbox"]) {
+    accent-color: var(--xodus-accent);
+  }
+  .xodus-inline-login :is(footer, .footer, #footer) {
+    background-color: var(--xodus-bg) !important;
+    color: var(--xodus-muted) !important;
+  }
+}

@@ -7,6 +7,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use xodus::tokens::TokenManager;
 
 mod commands;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod license;
 mod package;
 mod webview;

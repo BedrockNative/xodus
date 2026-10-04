@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Xodus
+Comment=Microsoft account sign-in for Xodus
+Exec=xodus-cli login
+Icon=io.github.BedrockNative.Xodus
+Terminal=false
+NoDisplay=true
+StartupWMClass=io.github.BedrockNative.Xodus

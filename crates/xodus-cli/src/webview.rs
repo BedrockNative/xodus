@@ -2,12 +2,17 @@ use tao::dpi::{LogicalSize, Size};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowTarget};
 use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::window::{Window, WindowBuilder};
+use tao::window::{Icon, Theme, Window, WindowBuilder};
 use wry::http::{HeaderMap, HeaderValue};
 use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder};
 use xodus::models::live::{DAProperty, HostBridgeMessage};
 
 type HandlerResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+fn login_theme_script() -> String {
+    let css = serde_json::Value::String(include_str!("login.css").to_owned());
+    include_str!("login-theme.js").replace("__XODUS_LOGIN_CSS__", &css.to_string())
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(u64);
@@ -145,11 +150,11 @@ pub fn login_request(client_id: String, market: String) -> WebviewRequest {
         HeaderValue::from_static(r#"CloudExperienceHost"#),
     );
 
-    WebviewRequest::new("Xodus login", url, headers)
+    WebviewRequest::new("Login with Xbox", url, headers)
 }
 
 pub fn finalize_request(url: String) -> WebviewRequest {
-    WebviewRequest::new("Xodus login", url, HeaderMap::new())
+    WebviewRequest::new("Login with Xbox", url, HeaderMap::new())
 }
 
 pub fn run_sessions<T>(handler: T) -> HandlerResult<Option<T::Output>>
@@ -157,6 +162,9 @@ where
     T: SessionHandler,
 {
     let profile = xodus::config::directory()?;
+    #[cfg(target_os = "linux")]
+    crate::desktop::prepare();
+
     let mut event_loop: EventLoop<CustomEvent> = EventLoopBuilder::with_user_event().build();
     let web_context = profile.map(|directory| WebContext::new(Some(directory.join("webview"))));
     let proxy = event_loop.create_proxy();
@@ -321,7 +329,15 @@ fn create_session<T: SessionHandler>(
     request: WebviewRequest,
 ) -> HandlerResult<()> {
     if state.window.is_none() {
+        let image = image::load_from_memory_with_format(
+            include_bytes!("../../../assets/Xbox/appicon.png"),
+            image::ImageFormat::Png,
+        )?
+        .into_rgba8();
+        let (width, height) = image.dimensions();
+        let icon = Icon::from_rgba(image.into_raw(), width, height)?;
         let window = WindowBuilder::new()
+            .with_window_icon(Some(icon))
             .with_resizable(false)
             .with_title(&request.title)
             .with_inner_size(Size::Logical(LogicalSize::new(500.0, 700.0)))
@@ -336,14 +352,21 @@ fn create_session<T: SessionHandler>(
     window.set_title(&request.title);
 
     let proxy_ipc = proxy.clone();
+    let theme_script = login_theme_script();
+    let background = match window.theme() {
+        Theme::Dark => (21, 24, 32, 255),
+        _ => (238, 241, 248, 255),
+    };
     let builder = match state.web_context.as_mut() {
         Some(context) => WebViewBuilder::new_with_web_context(context),
         None => WebViewBuilder::new(),
     };
     let builder = builder.with_url(&request.url)
+            .with_background_color(background)
             .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; MSAppHost/3.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.26100")
             .with_headers(request.headers)
             .with_initialization_script("window.external = {notify: window.ipc.postMessage }")
+            .with_initialization_script_for_main_only(&theme_script, false)
             .with_ipc_handler(move |request| {
                 let body = request.body();
                 let payload = serde_json::from_str::<DAProperty>(body);
